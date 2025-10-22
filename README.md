@@ -68,7 +68,7 @@ For now, please build from source:
     go build -o kernelview .
     ```
     This will create the `kernelview` executable in the current directory.
-4.  **(Optional) Move to PATH:** You can move the executable to a directory in your system's PATH for easier access:
+4.  **Move to PATH:** You can move the executable to a directory in your system's PATH for easier access:
     ```bash
     sudo mv kernelview /usr/local/bin/ # Example for Linux/macOS
     ```
@@ -81,22 +81,21 @@ Run the compiled executable:
 
 * **Normal Mode (Comprehensive Scan):**
     ```bash
-    ./kernelview
+    kernelview
     ```
-    *(Or just `kernelview` if moved to your PATH)*
 
 * **Fast Mode (Quick Scan):**
     ```bash
-    ./kernelview --fast
+    kernelview --fast
     # OR
-    ./kernelview -f
+    kernelview -f
     ```
 
 * **Help:**
     ```bash
-    ./kernelview --help
+    kernelview --help
     # OR
-    ./kernelview -h
+    kernelview -h
     ```
 
 ---
