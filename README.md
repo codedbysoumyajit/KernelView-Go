@@ -60,7 +60,7 @@ For now, please build from source:
 1.  **Prerequisites:** Ensure you have [**Go (1.25 or later)**](https://go.dev/dl/) installed.
 2.  **Clone the repository:**
     ```bash
-    git clone https://github.com/your-username/KernelView-Go.git # Replace with your repo URL
+    git clone https://github.com/codedbysoumyajit/KernelView-Go.git
     cd KernelView-Go
     ```
 3.  **Build:**
