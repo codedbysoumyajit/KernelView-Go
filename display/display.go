@@ -8,10 +8,11 @@ import (
 	"runtime"
 	"strings"
 
-	"KernelView-Go/gather" // Import the gather package to use SystemInfo
+	"golang.org/x/term" // Import the terminal package
+	"KernelView-Go/gather"
 )
 
-// Theme struct to hold color definitions (exported)
+// Theme struct (remains the same)
 type Theme struct {
 	Category string
 	Key      string
@@ -20,20 +21,20 @@ type Theme struct {
 	Reset    string
 }
 
-// Define the two themes (exported)
+// Define the two themes (exported) - **Only define once**
 var (
 	NormalTheme = Theme{
-		Category: "\033[34m",
-		Key:      "\033[38;5;255m",
-		Value:    "\033[38;5;249m",
-		Accent:   "\033[34m",
+		Category: "\033[34m",      // Bright Blue
+		Key:      "\033[38;5;255m", // White
+		Value:    "\033[38;5;249m", // Light Gray
+		Accent:   "\033[34m",      // Bright Blue
 		Reset:    "\033[0m",
 	}
 	FastTheme = Theme{
-		Category: "\033[36m",
-		Key:      "\033[38;5;255m",
-		Value:    "\033[38;5;249m",
-		Accent:   "\033[36m",
+		Category: "\033[36m",      // Bright Cyan
+		Key:      "\033[38;5;255m", // White
+		Value:    "\033[38;5;249m", // Light Gray
+		Accent:   "\033[36m",      // Bright Cyan
 		Reset:    "\033[0m",
 	}
 )
@@ -52,9 +53,27 @@ func Max(x, y int) int {
 	return x
 }
 
-// --- Display Function ---
+func truncateString(s string, maxLen int) string {
+	runes := []rune(s)
+	if len(runes) > maxLen {
+		return string(runes[:maxLen-1]) + "…" // Use ellipsis character
+	}
+	return s
+}
 
-// DisplaySystemInfo formats and prints the info (exported).
+// Get terminal width helper
+func getTerminalWidth() int {
+	width, _, err := term.GetSize(int(os.Stdout.Fd()))
+	if err != nil {
+		return 80 // Default width if detection fails
+	}
+	return width
+}
+
+
+// --- Display Functions ---
+
+// DisplaySystemInfo (remains mostly the same, just title centering adjusted)
 func DisplaySystemInfo(info *gather.SystemInfo, theme Theme) {
 	if runtime.GOOS == "windows" {
 		cmd := exec.Command("cmd", "/c", "cls")
@@ -71,8 +90,7 @@ func DisplaySystemInfo(info *gather.SystemInfo, theme Theme) {
 	}{
 		{"System", []infoEntry{{"OS", info.OS}, {"Kernel", info.Kernel}, {"Virtualization", info.Virtualization}, {"Uptime", info.Uptime}, {"Shell", info.Shell}, {"Terminal", info.Terminal}}},
 		{"Hardware", []infoEntry{{"CPU", info.CPU}, {"GPU", info.GPU}, {"RAM", info.RAM}}},
-		// {"Network", []infoEntry{{"Hostname", info.Hostname}, {"IP Address", info.IPAddress}, {"Speed", info.NetworkSpeed}}}, // Speed REMOVED
-		{"Network", []infoEntry{{"Hostname", info.Hostname}, {"IP Address", info.IPAddress}}}, // Corrected Network group
+		{"Network", []infoEntry{{"Hostname", info.Hostname}, {"IP Address", info.IPAddress}}},
 		{"Storage", []infoEntry{{"Disk", info.Disk}, {"Swap", info.Swap}}},
 		{"Display", []infoEntry{{"Resolution", info.Resolution}, {"DE", info.DE}, {"WM", info.WindowManager}}},
 		{"Software", []infoEntry{{"Packages", info.Packages}, {"Languages", info.Languages}, {"Go", info.Go}}},
@@ -122,16 +140,78 @@ func DisplaySystemInfo(info *gather.SystemInfo, theme Theme) {
 		}
 	}
 
-	// Print Title centered above the info block
+	// Print Title centered above the info block using terminal width
 	title := "KernelView Go"
-	if maxInfoWidth > 0 {
-		titleSpacing := Max(0, (maxInfoWidth/2)-(len(title)/2))
-		fmt.Printf("\n%s%s%s%s\n\n", strings.Repeat(" ", titleSpacing), theme.Accent, title, theme.Reset)
-	}
+	termWidth := getTerminalWidth()
+	titleSpacing := Max(0, (termWidth/2)-(len(title)/2)) // Center based on terminal width
+	fmt.Printf("\n%s%s%s%s\n\n", strings.Repeat(" ", titleSpacing), theme.Accent, title, theme.Reset)
 
-	// Print the formatted lines
+	// Print the formatted lines (they align themselves based on maxKeyLen)
 	for _, line := range finalFormattedLines {
 		fmt.Println(line)
 	}
 	fmt.Println() // Add a blank line at the bottom
+}
+
+
+// DisplayProcessList formats and prints the process list (Wider & Centered Title).
+func DisplayProcessList(processList []gather.ProcessInfo, theme Theme) {
+	if runtime.GOOS == "windows" {
+		cmd := exec.Command("cmd", "/c", "cls")
+		cmd.Stdout = os.Stdout
+		_ = cmd.Run()
+	} else {
+		fmt.Print("\033[H\033[2J\033[3J") // Clear screen
+	}
+
+	termWidth := getTerminalWidth()
+
+	// --- Add Centered Title ---
+	title := "KernelView Go - Processes"
+	titleSpacing := Max(0, (termWidth/2)-(len(title)/2))
+	fmt.Printf("\n%s%s%s%s\n\n", strings.Repeat(" ", titleSpacing), theme.Accent, title, theme.Reset)
+	// ---------------
+
+	// --- Adjust Column Widths ---
+	// PID(7) + Space(1) + NAME(Dynamic) + Space(1) + CPU%(8) + Space(1) + RAM(8) = 26 + Name
+	// Leave some padding at the end (~2 chars)
+	nameWidth := termWidth - 26 - 2
+	if nameWidth < 20 { // Ensure minimum name width
+		nameWidth = 20
+	}
+	totalWidth := 7 + 1 + nameWidth + 1 + 8 + 1 + 8
+
+	// Print Header (Wider)
+	fmt.Printf("%s%-7s %-*s %-8s %s%s\n",
+		theme.Key, "PID", nameWidth, "NAME", "CPU%", "RAM", theme.Reset)
+	fmt.Printf("%s%s%s\n", theme.Category, strings.Repeat("─", totalWidth), theme.Reset) // Wider Separator
+
+	limit := 30 // Show more processes if space allows
+	if len(processList) < limit {
+		limit = len(processList)
+	}
+
+	for _, p := range processList[:limit] {
+		// Format RAM
+		var ramStr string
+		ramMB := float64(p.RAM) / (1024 * 1024)
+		if ramMB < 10 {
+			ramKB := float64(p.RAM) / 1024
+			ramStr = fmt.Sprintf("%.0fK", ramKB)
+		} else if ramMB < 1024 {
+			ramStr = fmt.Sprintf("%.0fM", ramMB)
+		} else {
+			ramGB := ramMB / 1024
+			ramStr = fmt.Sprintf("%.1fG", ramGB)
+		}
+
+		// Print process row using theme colors (wider format)
+		fmt.Printf("%s%-7d %s%-*s %s%7.1f%% %s%7s %s%s\n",
+			theme.Value, p.PID,                    // PID
+			theme.Key, nameWidth, truncateString(p.Name, nameWidth), // Name (truncated)
+			theme.Value, p.CPU,                    // CPU %
+			theme.Value, ramStr,                   // RAM Usage (formatted)
+			theme.Reset, "")                       // Reset color
+	}
+	fmt.Println()
 }

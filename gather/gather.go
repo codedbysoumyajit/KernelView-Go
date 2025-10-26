@@ -18,6 +18,7 @@ import (
 	"github.com/shirou/gopsutil/v3/host"
 	"github.com/shirou/gopsutil/v3/mem"
 	psnet "github.com/shirou/gopsutil/v3/net"
+	"github.com/shirou/gopsutil/v3/process"
 )
 
 // SystemInfo holds all collected system data. Exported for use in main.
@@ -47,6 +48,15 @@ type SystemInfo struct {
 	Go             string
 	Virtualization string
 	Temperature    string // Skipped by --fast
+}
+
+// ProcessInfo holds details for a single process (Exported)
+type ProcessInfo struct {
+	PID     int32
+	Name    string
+	CPU     float64
+	RAM     uint64 // Store RAM in bytes
+	RAMPerc float32
 }
 
 // --- Internal Helper Functions ---
@@ -80,6 +90,7 @@ func runShellCommand(command string) string {
 
 // Simplified CPU Info - Relies solely on gopsutil
 func getCPUInfoDetailed() string {
+	// gopsutil cpu.Info() is generally the most straightforward cross-platform method
 	if c, err := cpu.Info(); err == nil && len(c) > 0 {
 		return c[0].ModelName
 	}
@@ -581,5 +592,72 @@ func GetSystemInfo(isFast bool) *SystemInfo {
 
 	wg.Wait()
 	return info
+}
+
+// GetProcessList fetches information about running processes. (Exported)
+func GetProcessList() ([]ProcessInfo, error) {
+	// Get all PIDs
+	pids, err := process.Pids()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get PIDs: %w", err)
+	}
+
+	var processList []ProcessInfo
+	var wg sync.WaitGroup
+	results := make(chan ProcessInfo, len(pids)) // Buffered channel
+
+	// It's important to get initial CPU times before fetching percentages
+	_, _ = cpu.Percent(0, false) // Prime the pump
+
+	for _, pid := range pids {
+		wg.Add(1)
+		go func(p int32) {
+			defer wg.Done()
+			proc, err := process.NewProcess(p)
+			if err != nil {
+				return // Skip if process disappeared or access denied
+			}
+
+			name, err := proc.Name()
+			if err != nil {
+				name = "<error>" // Assign placeholder if name fetch fails
+			}
+			// Skip kernel processes (often have empty names or specific patterns)
+			if name == "" || (runtime.GOOS == "linux" && (strings.HasPrefix(name, "[") || name == "systemd" || name == "init")) || (runtime.GOOS == "darwin" && name == "kernel_task") {
+				return
+			}
+
+			cpuPerc, _ := proc.CPUPercent() // Ignore error for now, might be 0
+			memInfo, err := proc.MemoryInfo()
+			memPerc, _ := proc.MemoryPercent() // Get memory percentage as well
+
+			if err == nil && memInfo != nil {
+				results <- ProcessInfo{
+					PID:     p,
+					Name:    name,
+					CPU:     cpuPerc,
+					RAM:     memInfo.RSS, // Use Resident Set Size (RSS)
+					RAMPerc: memPerc,
+				}
+			} else if err != nil {
+				// Optionally log error for specific process: log.Printf("Error getting mem info for PID %d: %v", p, err)
+			}
+		}(pid)
+	}
+
+	wg.Wait()
+	close(results)
+
+	// Collect results from channel
+	for pInfo := range results {
+		processList = append(processList, pInfo)
+	}
+
+	// Sort the list by CPU usage (descending)
+	sort.Slice(processList, func(i, j int) bool {
+		return processList[i].CPU > processList[j].CPU
+	})
+
+	return processList, nil
 }
 
