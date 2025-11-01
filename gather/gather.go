@@ -1,8 +1,10 @@
 package gather
 
 import (
+	"encoding/json" // For parsing ip-api response
 	"fmt"
 	"net"
+	"net/http" // For ip-api request
 	"os"
 	"os/exec"
 	"regexp"
@@ -13,12 +15,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-ping/ping" // Import ping package
 	"github.com/shirou/gopsutil/v3/cpu"
 	"github.com/shirou/gopsutil/v3/disk"
 	"github.com/shirou/gopsutil/v3/host"
 	"github.com/shirou/gopsutil/v3/mem"
 	psnet "github.com/shirou/gopsutil/v3/net"
-	"github.com/shirou/gopsutil/v3/process"
+	"github.com/shirou/gopsutil/v3/process" // Import process package
 )
 
 // SystemInfo holds all collected system data. Exported for use in main.
@@ -47,7 +50,7 @@ type SystemInfo struct {
 	Languages      string // Skipped by --fast
 	Go             string
 	Virtualization string
-	Temperature    string // Skipped by --fast
+	Temperature    string // New: Slow
 }
 
 // ProcessInfo holds details for a single process (Exported)
@@ -58,6 +61,32 @@ type ProcessInfo struct {
 	RAM     uint64 // Store RAM in bytes
 	RAMPerc float32
 }
+
+// NetworkInfo holds detailed network data (Exported)
+type NetworkInfo struct {
+	Hostname   string
+	PrivateIP  string
+	MACAddress string
+	PublicIP   string
+	ISP        string
+	City       string
+	Country    string
+	Proxy      string
+	DNSServers []string
+	Ping       string // e.g., "1.1.1.1: 15.2 ms"
+	IOCounters string // New: Network I/O
+}
+
+// Struct to parse ip-api.com response
+type ipAPIResponse struct {
+	Status      string  `json:"status"`
+	Country     string  `json:"country"`
+	City        string  `json:"city"`
+	ISP         string  `json:"isp"`
+	Query       string  `json:"query"` // This holds the public IP
+	Message     string  `json:"message"` // For error reporting
+}
+
 
 // --- Internal Helper Functions ---
 
@@ -85,6 +114,21 @@ func runShellCommand(command string) string {
 	}
 	return strings.TrimSpace(string(out))
 }
+
+// Helper to format bytes into readable string (GB, MB, KB)
+func formatBytes(b uint64) string {
+    if b > (1 << 30) { // Greater than 1 GB
+        return fmt.Sprintf("%.1f GB", float64(b)/(1<<30))
+    }
+    if b > (1 << 20) { // Greater than 1 MB
+        return fmt.Sprintf("%.1f MB", float64(b)/(1<<20))
+    }
+    if b > (1 << 10) { // Greater than 1 KB
+        return fmt.Sprintf("%.0f KB", float64(b)/(1<<10))
+    }
+    return fmt.Sprintf("%d B", b)
+}
+
 
 // --- Gathering Functions ---
 
@@ -169,7 +213,6 @@ func gatherMemoryInfo(info *SystemInfo, wg *sync.WaitGroup) {
 func getOSInfo() string {
 	switch runtime.GOOS {
 	case "linux":
-		// *** USE os.ReadFile instead of ioutil.ReadFile ***
 		if content, err := os.ReadFile("/etc/os-release"); err == nil {
 			re := regexp.MustCompile(`PRETTY_NAME="([^"]+)"`)
 			if match := re.FindStringSubmatch(string(content)); len(match) > 1 {
@@ -531,9 +574,158 @@ func getTemperatures() string {
 	return fmt.Sprintf("%.1f °C", temps[0].Temperature)
 }
 
-// --- Main Orchestration ---
+// --- Network Specific Functions ---
 
-// GetSystemInfo is the main exported function to collect data.
+func getPrimaryMACAddress() string {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return "N/A"
+	}
+	for _, iface := range interfaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 || strings.Contains(strings.ToLower(iface.Name), "virtual") || strings.Contains(strings.ToLower(iface.Name), "docker") {
+			continue
+		}
+		if iface.HardwareAddr.String() != "" {
+			return iface.HardwareAddr.String()
+		}
+	}
+	return "N/A"
+}
+
+func getPublicIPInfo() (ip, isp, city, country string, err error) {
+	client := http.Client{
+		Timeout: 800 * time.Millisecond,
+	}
+	resp, err := client.Get("http://ip-api.com/json/")
+	if err != nil {
+		return "", "", "", "", fmt.Errorf("failed to reach ip-api: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var apiResp ipAPIResponse
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return "", "", "", "", fmt.Errorf("failed to parse ip-api response: %w", err)
+	}
+
+	if apiResp.Status != "success" {
+		return "", "", "", "", fmt.Errorf("ip-api error: %s", apiResp.Message)
+	}
+
+	return apiResp.Query, apiResp.ISP, apiResp.City, apiResp.Country, nil
+}
+
+func getProxyInfo() string {
+	httpProxy := os.Getenv("HTTP_PROXY")
+	httpsProxy := os.Getenv("HTTPS_PROXY")
+	if httpProxy != "" {
+		return fmt.Sprintf("HTTP: %s", httpProxy)
+	}
+	if httpsProxy != "" {
+		return fmt.Sprintf("HTTPS: %s", httpsProxy)
+	}
+	return "None"
+}
+
+func getDNSServers() []string {
+	var dnsServers []string
+	if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
+		content, err := os.ReadFile("/etc/resolv.conf")
+		if err == nil {
+			lines := strings.Split(string(content), "\n")
+			for _, line := range lines {
+				line = strings.TrimSpace(line)
+				if strings.HasPrefix(line, "nameserver") {
+					parts := strings.Fields(line)
+					if len(parts) >= 2 {
+						dnsServers = append(dnsServers, parts[1])
+					}
+				}
+			}
+		}
+	} else if runtime.GOOS == "windows" {
+		return []string{"(Check ipconfig /all)"}
+	}
+	if len(dnsServers) == 0 {
+		return []string{"N/A"}
+	}
+	if len(dnsServers) > 3 {
+		dnsServers = append(dnsServers[:3], "...")
+	}
+	return dnsServers
+}
+
+func getPingTime(host string) string {
+	pinger, err := ping.NewPinger(host)
+	if err != nil {
+		return fmt.Sprintf("%s: Error", host)
+	}
+
+	pinger.Count = 1
+	pinger.Timeout = 800 * time.Millisecond
+	pinger.SetPrivileged(runtime.GOOS != "windows")
+
+	err = pinger.Run()
+	if err != nil {
+        if strings.Contains(err.Error(), "operation not permitted") || strings.Contains(err.Error(), "requires administrator privileges") {
+             return fmt.Sprintf("%s: Need Privileges", host)
+        }
+		return fmt.Sprintf("%s: Failed", host)
+	}
+
+	stats := pinger.Statistics()
+	if stats.PacketsRecv > 0 {
+		return fmt.Sprintf("%s: %.1f ms", host, float64(stats.AvgRtt.Microseconds())/1000.0)
+	}
+	return fmt.Sprintf("%s: Timeout", host)
+}
+
+// ** NEW FUNCTION **
+func getIOCounters() string {
+	// true = per interface
+	counters, err := psnet.IOCounters(true)
+	if err != nil {
+		return "N/A"
+	}
+	
+	// Get list of interfaces
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return "N/A"
+	}
+	
+	// Find the primary, active, non-loopback interface
+	for _, iface := range ifaces {
+		// Skip down, loopback, and virtual interfaces
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 || strings.Contains(strings.ToLower(iface.Name), "virtual") || strings.Contains(strings.ToLower(iface.Name), "docker") || strings.HasPrefix(iface.Name, "veth") {
+			continue
+		}
+		
+		// Find the counters for this interface
+		for _, counter := range counters {
+			if counter.Name == iface.Name {
+				// Found it. Format and return.
+				return fmt.Sprintf("%s (Sent: %s, Recv: %s)", 
+					iface.Name, 
+					formatBytes(counter.BytesSent), 
+					formatBytes(counter.BytesRecv))
+			}
+		}
+	}
+	
+	// Fallback to all (sum of) interfaces if no clear primary found
+	if len(counters) > 0 {
+		return fmt.Sprintf("All (Sent: %s, Recv: %s)",
+			formatBytes(counters[0].BytesSent), 
+			formatBytes(counters[0].BytesRecv))
+	}
+
+	return "N/A"
+}
+
+
+// --- Main Orchestration Functions ---
+
+// GetSystemInfo is the main exported function to collect system data.
 func GetSystemInfo(isFast bool) *SystemInfo {
 	info := &SystemInfo{}
 	var wg sync.WaitGroup
@@ -572,14 +764,12 @@ func GetSystemInfo(isFast bool) *SystemInfo {
 			"Packages":    &info.Packages,
 			"Languages":   &info.Languages,
 			"Temperature": &info.Temperature,
-			// "NetworkSpeed": &info.NetworkSpeed, // REMOVED
 		}
 		slowTaskFuncs := map[string]func() string{
 			"OpenPorts":   getOpenPorts,
 			"Packages":    getPackageCounts,
 			"Languages":   getInstalledLanguages,
 			"Temperature": getTemperatures,
-			// "NetworkSpeed": getNetworkSpeed, // REMOVED
 		}
 		for key, Ptr := range slowTasks {
 			wg.Add(1)
@@ -596,7 +786,6 @@ func GetSystemInfo(isFast bool) *SystemInfo {
 
 // GetProcessList fetches information about running processes. (Exported)
 func GetProcessList() ([]ProcessInfo, error) {
-	// Get all PIDs
 	pids, err := process.Pids()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get PIDs: %w", err)
@@ -604,10 +793,15 @@ func GetProcessList() ([]ProcessInfo, error) {
 
 	var processList []ProcessInfo
 	var wg sync.WaitGroup
-	results := make(chan ProcessInfo, len(pids)) // Buffered channel
+	results := make(chan ProcessInfo, len(pids))
 
-	// It's important to get initial CPU times before fetching percentages
-	_, _ = cpu.Percent(0, false) // Prime the pump
+	// Prime CPU Percent calculation
+	allProcs, _ := process.Processes()
+	for _, p := range allProcs {
+		_, _ = p.CPUPercent() // Initial call to start measurement
+	}
+	time.Sleep(150 * time.Millisecond) // Adjusted sleep duration
+
 
 	for _, pid := range pids {
 		wg.Add(1)
@@ -615,32 +809,30 @@ func GetProcessList() ([]ProcessInfo, error) {
 			defer wg.Done()
 			proc, err := process.NewProcess(p)
 			if err != nil {
-				return // Skip if process disappeared or access denied
-			}
-
-			name, err := proc.Name()
-			if err != nil {
-				name = "<error>" // Assign placeholder if name fetch fails
-			}
-			// Skip kernel processes (often have empty names or specific patterns)
-			if name == "" || (runtime.GOOS == "linux" && (strings.HasPrefix(name, "[") || name == "systemd" || name == "init")) || (runtime.GOOS == "darwin" && name == "kernel_task") {
 				return
 			}
 
-			cpuPerc, _ := proc.CPUPercent() // Ignore error for now, might be 0
-			memInfo, err := proc.MemoryInfo()
-			memPerc, _ := proc.MemoryPercent() // Get memory percentage as well
+			name, _ := proc.Name() 
+			if name == "" || p <= 1 || (runtime.GOOS == "linux" && strings.HasPrefix(name, "[") ) || name == "kernel_task" || name == "systemd" || name == "init" || name == "idle" {
+				return
+			}
 
-			if err == nil && memInfo != nil {
+
+			cpuPerc, err := proc.CPUPercent()
+			if err != nil {
+                cpuPerc = 0.0
+            }
+			memInfo, errMem := proc.MemoryInfo()
+			memPerc, errMemPerc := proc.MemoryPercent()
+
+			if errMem == nil && errMemPerc == nil && memInfo != nil {
 				results <- ProcessInfo{
 					PID:     p,
 					Name:    name,
 					CPU:     cpuPerc,
-					RAM:     memInfo.RSS, // Use Resident Set Size (RSS)
+					RAM:     memInfo.RSS,
 					RAMPerc: memPerc,
 				}
-			} else if err != nil {
-				// Optionally log error for specific process: log.Printf("Error getting mem info for PID %d: %v", p, err)
 			}
 		}(pid)
 	}
@@ -648,16 +840,67 @@ func GetProcessList() ([]ProcessInfo, error) {
 	wg.Wait()
 	close(results)
 
-	// Collect results from channel
 	for pInfo := range results {
-		processList = append(processList, pInfo)
+		if pInfo.CPU > 0.05 || pInfo.RAMPerc > 0.1 {
+			processList = append(processList, pInfo)
+		}
 	}
 
-	// Sort the list by CPU usage (descending)
 	sort.Slice(processList, func(i, j int) bool {
-		return processList[i].CPU > processList[j].CPU
+		if processList[i].CPU != processList[j].CPU {
+			return processList[i].CPU > processList[j].CPU
+		}
+		return processList[i].RAM > processList[j].RAM
 	})
 
 	return processList, nil
 }
 
+// GetNetworkDetails fetches all network-related info (Exported)
+func GetNetworkDetails() (*NetworkInfo, error) {
+	info := &NetworkInfo{}
+	var wg sync.WaitGroup
+	var errPublicIP error
+
+	wg.Add(3)
+
+	go func() {
+		defer wg.Done()
+		info.PublicIP, info.ISP, info.City, info.Country, errPublicIP = getPublicIPInfo()
+	}()
+
+	go func() {
+		defer wg.Done()
+		info.Ping = getPingTime("1.1.1.1") // Ping Cloudflare
+	}()
+
+	go func() {
+		defer wg.Done()
+		info.DNSServers = getDNSServers()
+	}()
+
+	// Run fast local fetches concurrently
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		info.Hostname, _ = os.Hostname()
+		info.PrivateIP = getIPAddress()
+		info.MACAddress = getPrimaryMACAddress()
+		info.Proxy = getProxyInfo()
+		info.IOCounters = getIOCounters() // ** ADDED **
+	}()
+
+
+	wg.Wait()
+
+	if errPublicIP != nil {
+		info.PublicIP = "Error"
+		info.ISP = "Error"
+		info.City = "Error"
+		info.Country = "Error"
+		// This now runs in the background, so we just log the error
+		// fmt.Fprintf(os.Stderr, "Warning: Could not fetch public IP info: %v\n", errPublicIP)
+	}
+
+	return info, nil
+}

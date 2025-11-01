@@ -1,25 +1,70 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
-	"log" // Import log package for error handling
+	"log"
 	"os"
 
-	// Import local packages using the module path defined in go.mod
 	"KernelView-Go/display"
 	"KernelView-Go/gather"
 )
 
+// version is set at build time
+var version = "v0.1.0-alpha"
+
+// handleJSONOutput handles all --json flag requests
+func handleJSONOutput(processFlag, networkFlag, fastFlag bool) {
+	encoder := json.NewEncoder(os.Stdout)
+	encoder.SetIndent("", "  ") // Pretty-print JSON
+
+	var data interface{}
+	var err error
+
+	if processFlag {
+		data, err = gather.GetProcessList()
+		if err != nil {
+			log.Fatalf("Error getting process list: %v", err)
+		}
+	} else if networkFlag {
+		data, err = gather.GetNetworkDetails()
+		if err != nil {
+			log.Printf("Warning: Encountered errors fetching network details: %v", err)
+		}
+	} else {
+		data = gather.GetSystemInfo(fastFlag)
+	}
+
+	// Encode the data to stdout
+	if err := encoder.Encode(data); err != nil {
+		log.Fatalf("Error encoding JSON: %v", err)
+	}
+}
+
 func main() {
 	// Define flags
 	var fastFlag bool
-	flag.BoolVar(&fastFlag, "fast", false, "Run in fast mode: Skips slower checks.")
-	flag.BoolVar(&fastFlag, "f", false, "Run in fast mode (shorthand).")
+	flag.BoolVar(&fastFlag, "fast", false, "Run system info in fast mode: Skips slower checks.")
+	flag.BoolVar(&fastFlag, "f", false, "Run system info in fast mode (shorthand).")
 
-	var processFlag bool // New flag for process list
+	var processFlag bool
 	flag.BoolVar(&processFlag, "process", false, "Display list of running processes.")
 	flag.BoolVar(&processFlag, "p", false, "Display list of running processes (shorthand).")
+
+	var networkFlag bool // New network flag
+	flag.BoolVar(&networkFlag, "network", false, "Display detailed network information.")
+	flag.BoolVar(&networkFlag, "n", false, "Display detailed network information (shorthand).")
+
+	var versionFlag bool
+	flag.BoolVar(&versionFlag, "version", false, "Print the version and exit.")
+	flag.BoolVar(&versionFlag, "v", false, "Print the version and exit (shorthand).")
+
+	var jsonFlag bool
+	flag.BoolVar(&jsonFlag, "json", false, "Output information as JSON.")
+
+	var noColorFlag bool
+	flag.BoolVar(&noColorFlag, "no-color", false, "Disable all color and formatting.")
 
 
 	// Custom usage message
@@ -29,34 +74,79 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Flags:\n")
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\nDescription:\n")
-		fmt.Fprintf(os.Stderr, "  KernelView Go displays system information.\n")
-		fmt.Fprintf(os.Stderr, "  Default mode performs a comprehensive scan (slower).\n")
-		fmt.Fprintf(os.Stderr, "  Fast mode (-f, --fast) provides essential info instantly.\n")
-		fmt.Fprintf(os.Stderr, "  Process mode (-p, --process) shows a list of running processes.\n") // Added description
+		fmt.Fprintf(os.Stderr, "  KernelView Go displays system, process, or network information.\n")
+		fmt.Fprintf(os.Stderr, "  Modes are mutually exclusive (-f, -p, -n).\n")
 	}
 
 	flag.Parse()
 
-	// Select theme (use normal theme for process list for now)
+	// --- Handle Priority Flags ---
+
+	// 1. Version flag
+	if versionFlag {
+		fmt.Println("KernelView Go " + version)
+		os.Exit(0)
+	}
+
+	// 2. Check for mutually exclusive modes
+	modeCount := 0
+	if fastFlag { modeCount++ }
+	if processFlag { modeCount++ }
+	if networkFlag { modeCount++ }
+
+	if modeCount > 1 {
+		fmt.Fprintf(os.Stderr, "Error: -f, -p, and -n flags are mutually exclusive.\n\n")
+		flag.Usage()
+		os.Exit(1)
+	}
+
+	// 3. Handle JSON output
+	if jsonFlag {
+		handleJSONOutput(processFlag, networkFlag, fastFlag)
+		os.Exit(0)
+	}
+
+	// --- Handle Standard Display ---
+
 	var currentTheme display.Theme
-	if fastFlag && !processFlag { // Only use fast theme if -f is set AND -p is NOT
+	mode := "system" // Default mode
+
+	if processFlag {
+		mode = "process"
+	} else if networkFlag {
+		mode = "network"
+	}
+
+	// Select theme
+	if noColorFlag {
+		currentTheme = display.BlankTheme
+	} else if fastFlag {
 		currentTheme = display.FastTheme
 	} else {
 		currentTheme = display.NormalTheme
 	}
 
 
-	// --- Conditional Execution ---
-	if processFlag {
-		// Get and display process list
+	// --- Execute Selected Mode ---
+	switch mode {
+	case "process":
 		processList, err := gather.GetProcessList()
 		if err != nil {
-			log.Fatalf("Error getting process list: %v", err) // Use log.Fatalf for critical errors
+			log.Fatalf("Error getting process list: %v", err)
 		}
 		display.DisplayProcessList(processList, currentTheme)
-	} else {
-		// Get and display system info (existing logic)
-		info := gather.GetSystemInfo(fastFlag)
+	case "network":
+		networkInfo, err := gather.GetNetworkDetails()
+		if err != nil {
+			log.Printf("Warning: Encountered errors fetching some network details: %v", err)
+		}
+		if networkInfo != nil {
+			display.DisplayNetworkInfo(networkInfo, currentTheme)
+		} else {
+             log.Fatalf("Error getting network details.")
+        }
+	default: // "system" mode
+		info := gather.GetSystemInfo(fastFlag) // Pass fastFlag here
 		display.DisplaySystemInfo(info, currentTheme)
 	}
 }

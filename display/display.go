@@ -12,7 +12,7 @@ import (
 	"KernelView-Go/gather"
 )
 
-// Theme struct (remains the same)
+// Theme struct to hold color definitions (exported)
 type Theme struct {
 	Category string
 	Key      string
@@ -21,7 +21,7 @@ type Theme struct {
 	Reset    string
 }
 
-// Define the two themes (exported) - **Only define once**
+// Define the two themes (exported)
 var (
 	NormalTheme = Theme{
 		Category: "\033[34m",      // Bright Blue
@@ -36,6 +36,14 @@ var (
 		Value:    "\033[38;5;249m", // Light Gray
 		Accent:   "\033[36m",      // Bright Cyan
 		Reset:    "\033[0m",
+	}
+	// New: BlankTheme for --no-color
+	BlankTheme = Theme{
+		Category: "",
+		Key:      "",
+		Value:    "",
+		Accent:   "",
+		Reset:    "",
 	}
 )
 
@@ -56,16 +64,20 @@ func Max(x, y int) int {
 func truncateString(s string, maxLen int) string {
 	runes := []rune(s)
 	if len(runes) > maxLen {
+		if maxLen < 1 {
+			maxLen = 1
+		}
 		return string(runes[:maxLen-1]) + "…" // Use ellipsis character
 	}
 	return s
 }
 
+
 // Get terminal width helper
 func getTerminalWidth() int {
 	width, _, err := term.GetSize(int(os.Stdout.Fd()))
-	if err != nil {
-		return 80 // Default width if detection fails
+	if err != nil || width <= 0 {
+		return 80 // Default width
 	}
 	return width
 }
@@ -73,7 +85,7 @@ func getTerminalWidth() int {
 
 // --- Display Functions ---
 
-// DisplaySystemInfo (remains mostly the same, just title centering adjusted)
+// DisplaySystemInfo formats and prints the info (exported).
 func DisplaySystemInfo(info *gather.SystemInfo, theme Theme) {
 	if runtime.GOOS == "windows" {
 		cmd := exec.Command("cmd", "/c", "cls")
@@ -146,7 +158,7 @@ func DisplaySystemInfo(info *gather.SystemInfo, theme Theme) {
 	titleSpacing := Max(0, (termWidth/2)-(len(title)/2)) // Center based on terminal width
 	fmt.Printf("\n%s%s%s%s\n\n", strings.Repeat(" ", titleSpacing), theme.Accent, title, theme.Reset)
 
-	// Print the formatted lines (they align themselves based on maxKeyLen)
+	// Print the formatted lines
 	for _, line := range finalFormattedLines {
 		fmt.Println(line)
 	}
@@ -173,20 +185,28 @@ func DisplayProcessList(processList []gather.ProcessInfo, theme Theme) {
 	// ---------------
 
 	// --- Adjust Column Widths ---
-	// PID(7) + Space(1) + NAME(Dynamic) + Space(1) + CPU%(8) + Space(1) + RAM(8) = 26 + Name
-	// Leave some padding at the end (~2 chars)
-	nameWidth := termWidth - 26 - 2
-	if nameWidth < 20 { // Ensure minimum name width
-		nameWidth = 20
+	pidWidth := 8       // Fixed width for PID
+	cpuWidth := 8       // Fixed width for CPU%
+	ramWidth := 8       // Fixed width for RAM
+	nameWidth := termWidth - pidWidth - cpuWidth - ramWidth - 5 // Dynamic name width
+	minNameWidth := 20
+	if nameWidth < minNameWidth {
+		nameWidth = minNameWidth
 	}
-	totalWidth := 7 + 1 + nameWidth + 1 + 8 + 1 + 8
+	totalWidth := pidWidth + nameWidth + cpuWidth + ramWidth + 3
+	if totalWidth > termWidth {
+		nameWidth -= (totalWidth - termWidth) // Shrink name if total is still too wide
+	}
+	if nameWidth < minNameWidth { nameWidth = minNameWidth }
+	totalWidth = pidWidth + nameWidth + cpuWidth + ramWidth + 3
+
 
 	// Print Header (Wider)
-	fmt.Printf("%s%-7s %-*s %-8s %s%s\n",
-		theme.Key, "PID", nameWidth, "NAME", "CPU%", "RAM", theme.Reset)
+	fmt.Printf("%s%-*s %-*s %*s %*s%s\n",
+		theme.Key, pidWidth, "PID", nameWidth, "NAME", cpuWidth, "CPU%", ramWidth, "RAM", theme.Reset)
 	fmt.Printf("%s%s%s\n", theme.Category, strings.Repeat("─", totalWidth), theme.Reset) // Wider Separator
 
-	limit := 30 // Show more processes if space allows
+	limit := 30
 	if len(processList) < limit {
 		limit = len(processList)
 	}
@@ -195,7 +215,7 @@ func DisplayProcessList(processList []gather.ProcessInfo, theme Theme) {
 		// Format RAM
 		var ramStr string
 		ramMB := float64(p.RAM) / (1024 * 1024)
-		if ramMB < 10 {
+		if ramMB < 1.0 {
 			ramKB := float64(p.RAM) / 1024
 			ramStr = fmt.Sprintf("%.0fK", ramKB)
 		} else if ramMB < 1024 {
@@ -205,13 +225,78 @@ func DisplayProcessList(processList []gather.ProcessInfo, theme Theme) {
 			ramStr = fmt.Sprintf("%.1fG", ramGB)
 		}
 
-		// Print process row using theme colors (wider format)
-		fmt.Printf("%s%-7d %s%-*s %s%7.1f%% %s%7s %s%s\n",
-			theme.Value, p.PID,                    // PID
-			theme.Key, nameWidth, truncateString(p.Name, nameWidth), // Name (truncated)
-			theme.Value, p.CPU,                    // CPU %
-			theme.Value, ramStr,                   // RAM Usage (formatted)
-			theme.Reset, "")                       // Reset color
+		// Print process row
+		fmt.Printf("%s%-*d %s%-*s %s%*.1f%% %s%*s %s%s\n",
+			theme.Value, pidWidth, p.PID,
+			theme.Key, nameWidth, truncateString(p.Name, nameWidth),
+			theme.Value, cpuWidth-1, p.CPU,
+			theme.Value, ramWidth, ramStr,
+			theme.Reset, "")
 	}
 	fmt.Println()
+}
+
+// DisplayNetworkInfo formats and prints detailed network info (Exported)
+func DisplayNetworkInfo(info *gather.NetworkInfo, theme Theme) {
+	if runtime.GOOS == "windows" {
+		cmd := exec.Command("cmd", "/c", "cls")
+		cmd.Stdout = os.Stdout
+		_ = cmd.Run()
+	} else {
+		fmt.Print("\033[H\033[2J\033[3J") // Clear screen
+	}
+
+	termWidth := getTerminalWidth()
+
+	// --- Add Centered Title ---
+	title := "KernelView Go - Network Details"
+	titleSpacing := Max(0, (termWidth/2)-(len(title)/2))
+	fmt.Printf("\n%s%s%s%s\n\n", strings.Repeat(" ", titleSpacing), theme.Accent, title, theme.Reset)
+	// ---------------
+
+	// Prepare data - find max key length
+	items := []struct{ Key, Value string }{
+		{"Hostname", info.Hostname},
+		{"Private IP", info.PrivateIP},
+		{"MAC Address", info.MACAddress},
+		{"I/O Counters", info.IOCounters}, // ** ADDED **
+		{"Public IP", info.PublicIP},
+		{"ISP", info.ISP},
+		{"Location", fmt.Sprintf("%s, %s", info.City, info.Country)},
+		{"Proxy", info.Proxy},
+		{"DNS Servers", strings.Join(info.DNSServers, ", ")},
+		{"Ping (1.1.1.1)", info.Ping},
+	}
+
+	maxKeyLen := 0
+	validItems := []struct{ Key, Value string }{} // Filter out empty values
+	for _, item := range items {
+		val := strings.TrimSpace(item.Value)
+		if val != "" && val != "N/A" && val != "Error" && val != "," && val != "Error, Error" {
+			if item.Key == "Location" && (info.City == "" || info.City == "Error") && (info.Country == "" || info.Country == "Error") {
+				continue
+			}
+			if item.Key == "Location" && (info.City == "" || info.City == "Error") {
+				item.Value = info.Country
+			}
+			if item.Key == "Location" && (info.Country == "" || info.Country == "Error") {
+				item.Value = info.City
+			}
+
+			validItems = append(validItems, item)
+			if len(item.Key) > maxKeyLen {
+				maxKeyLen = len(item.Key)
+			}
+		}
+	}
+
+	// Print lines
+	for _, item := range validItems {
+		padding := strings.Repeat(" ", maxKeyLen-len(item.Key))
+		fmt.Printf("%s%s%s: %s%s%s\n",
+			theme.Key, item.Key, padding,
+			theme.Value, item.Value, theme.Reset)
+	}
+
+	fmt.Println() // Add a blank line at the bottom
 }
