@@ -1,10 +1,11 @@
 package gather
 
 import (
-	"encoding/json" // For parsing ip-api response
+	"bufio"
+	"encoding/json"
 	"fmt"
 	"net"
-	"net/http" // For ip-api request
+	"net/http"
 	"os"
 	"os/exec"
 	"regexp"
@@ -15,18 +16,18 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-ping/ping" // Import ping package
 	"github.com/shirou/gopsutil/v3/cpu"
 	"github.com/shirou/gopsutil/v3/disk"
 	"github.com/shirou/gopsutil/v3/host"
 	"github.com/shirou/gopsutil/v3/mem"
 	psnet "github.com/shirou/gopsutil/v3/net"
-	"github.com/shirou/gopsutil/v3/process" // Import process package
+	"github.com/shirou/gopsutil/v3/process"
 )
 
 // SystemInfo holds all collected system data. Exported for use in main.
 type SystemInfo struct {
 	OS             string
+	Host           string
 	Kernel         string
 	Uptime         string
 	Shell          string
@@ -50,7 +51,7 @@ type SystemInfo struct {
 	Languages      string // Skipped by --fast
 	Go             string
 	Virtualization string
-	Temperature    string // New: Slow
+	Temperature    string // Skipped by --fast
 }
 
 // ProcessInfo holds details for a single process (Exported)
@@ -73,26 +74,25 @@ type NetworkInfo struct {
 	Country    string
 	Proxy      string
 	DNSServers []string
-	Ping       string // e.g., "1.1.1.1: 15.2 ms"
-	IOCounters string // New: Network I/O
+	Ping       string // e.g., "15.2 ms"
+	IOCounters string // Network I/O
 }
 
 // Struct to parse ip-api.com response
 type ipAPIResponse struct {
-	Status      string  `json:"status"`
-	Country     string  `json:"country"`
-	City        string  `json:"city"`
-	ISP         string  `json:"isp"`
-	Query       string  `json:"query"` // This holds the public IP
-	Message     string  `json:"message"` // For error reporting
+	Status  string `json:"status"`
+	Country string `json:"country"`
+	City    string `json:"city"`
+	ISP     string `json:"isp"`
+	Query   string `json:"query"` // This holds the public IP
+	Message string `json:"message"`
 }
-
 
 // --- Internal Helper Functions ---
 
 func runCommand(name string, arg ...string) string {
 	cmd := exec.Command(name, arg...)
-	cmd.Stderr = nil // Suppress errors
+	cmd.Stderr = nil
 	out, err := cmd.Output()
 	if err != nil {
 		return ""
@@ -107,7 +107,7 @@ func runShellCommand(command string) string {
 	} else {
 		cmd = exec.Command("sh", "-c", command)
 	}
-	cmd.Stderr = nil // Suppress errors
+	cmd.Stderr = nil
 	out, err := cmd.Output()
 	if err != nil {
 		return ""
@@ -115,50 +115,123 @@ func runShellCommand(command string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// Helper to format bytes into readable string (GB, MB, KB)
 func formatBytes(b uint64) string {
-    if b > (1 << 30) { // Greater than 1 GB
-        return fmt.Sprintf("%.1f GB", float64(b)/(1<<30))
-    }
-    if b > (1 << 20) { // Greater than 1 MB
-        return fmt.Sprintf("%.1f MB", float64(b)/(1<<20))
-    }
-    if b > (1 << 10) { // Greater than 1 KB
-        return fmt.Sprintf("%.0f KB", float64(b)/(1<<10))
-    }
-    return fmt.Sprintf("%d B", b)
+	if b > (1 << 30) {
+		return fmt.Sprintf("%.1f GB", float64(b)/(1<<30))
+	}
+	if b > (1 << 20) {
+		return fmt.Sprintf("%.1f MB", float64(b)/(1<<20))
+	}
+	if b > (1 << 10) {
+		return fmt.Sprintf("%.0f KB", float64(b)/(1<<10))
+	}
+	return fmt.Sprintf("%d B", b)
 }
-
 
 // --- Gathering Functions ---
 
-// Simplified CPU Info - Relies solely on gopsutil
-func getCPUInfoDetailed() string {
-	// gopsutil cpu.Info() is generally the most straightforward cross-platform method
-	if c, err := cpu.Info(); err == nil && len(c) > 0 {
-		return c[0].ModelName
+func getHostModel() string {
+	switch runtime.GOOS {
+	case "linux":
+		if content, err := os.ReadFile("/sys/devices/virtual/dmi/id/product_name"); err == nil {
+			name := strings.TrimSpace(string(content))
+			if contentVer, err := os.ReadFile("/sys/devices/virtual/dmi/id/product_version"); err == nil {
+				ver := strings.TrimSpace(string(contentVer))
+				if name != "" && ver != "" && ver != "None" && ver != "System Version" {
+					return fmt.Sprintf("%s %s", name, ver)
+				}
+			}
+			if name != "" {
+				return name
+			}
+		}
+		if content, err := os.ReadFile("/sys/class/dmi/id/product_name"); err == nil {
+			name := strings.TrimSpace(string(content))
+			if name != "" {
+				return name
+			}
+		}
+		if content, err := os.ReadFile("/sys/firmware/devicetree/base/model"); err == nil {
+			name := strings.TrimSpace(string(content))
+			if name != "" {
+				return name
+			}
+		}
+	case "darwin":
+		cmd := exec.Command("sysctl", "-n", "hw.model")
+		if out, err := cmd.Output(); err == nil {
+			return strings.TrimSpace(string(out))
+		}
+	case "windows":
+		cmd := exec.Command("wmic", "computersystem", "get", "model")
+		if out, err := cmd.Output(); err == nil {
+			lines := strings.Split(string(out), "\n")
+			if len(lines) > 1 {
+				return strings.TrimSpace(lines[1])
+			}
+		}
 	}
-	return "Unknown Processor"
+	return ""
+}
+
+func getLinuxUptime() (string, error) {
+	content, err := os.ReadFile("/proc/uptime")
+	if err != nil {
+		return "", err
+	}
+	fields := strings.Fields(string(content))
+	if len(fields) < 1 {
+		return "", fmt.Errorf("invalid uptime format")
+	}
+	secs, err := strconv.ParseFloat(fields[0], 64)
+	if err != nil {
+		return "", err
+	}
+
+	uptimeDuration := time.Duration(secs) * time.Second
+	days := int(uptimeDuration.Hours() / 24)
+	hours := int(uptimeDuration.Hours()) % 24
+	minutes := int(uptimeDuration.Minutes()) % 60
+
+	if days > 0 {
+		return fmt.Sprintf("%d days, %d hours, %d mins", days, hours, minutes), nil
+	} else if hours > 0 {
+		return fmt.Sprintf("%d hours, %d mins", hours, minutes), nil
+	}
+	return fmt.Sprintf("%d mins", minutes), nil
 }
 
 func gatherHostInfo(info *SystemInfo, wg *sync.WaitGroup) {
 	defer wg.Done()
+
+	if runtime.GOOS == "linux" {
+		uptime, err := getLinuxUptime()
+		if err == nil {
+			info.Uptime = uptime
+		}
+	}
+
 	h, err := host.Info()
 	if err != nil {
 		return
 	}
-	uptimeDuration := time.Second * time.Duration(h.Uptime)
-	days := int(uptimeDuration.Hours() / 24)
-	hours := int(uptimeDuration.Hours()) % 24
-	minutes := int(uptimeDuration.Minutes()) % 60
-	if days > 0 {
-		info.Uptime = fmt.Sprintf("%d days, %d hours", days, hours)
-	} else if hours > 0 {
-		info.Uptime = fmt.Sprintf("%d hours, %d minutes", hours, minutes)
-	} else {
-		info.Uptime = fmt.Sprintf("%d minutes", minutes)
+
+	if info.Uptime == "" {
+		uptimeDuration := time.Second * time.Duration(h.Uptime)
+		days := int(uptimeDuration.Hours() / 24)
+		hours := int(uptimeDuration.Hours()) % 24
+		minutes := int(uptimeDuration.Minutes()) % 60
+		if days > 0 {
+			info.Uptime = fmt.Sprintf("%d days, %d hours, %d mins", days, hours, minutes)
+		} else if hours > 0 {
+			info.Uptime = fmt.Sprintf("%d hours, %d mins", hours, minutes)
+		} else {
+			info.Uptime = fmt.Sprintf("%d mins", minutes)
+		}
 	}
-	info.OS = getOSInfo() // OS info fetched once here
+
+	info.OS = getOSInfo()
+	info.Host = getHostModel()
 	kernelName := h.Platform
 	if kernelName == "windows" {
 		kernelName = "Windows NT"
@@ -169,21 +242,26 @@ func gatherHostInfo(info *SystemInfo, wg *sync.WaitGroup) {
 
 func gatherCPUInfo(info *SystemInfo, wg *sync.WaitGroup, isFast bool) {
 	defer wg.Done()
-	info.CPU = getCPUInfoDetailed() // Calls the simplified version now
-	if cpuStats, err := cpu.Info(); err == nil && len(cpuStats) > 0 {
+
+	cpuStats, err := cpu.Info()
+	if err == nil && len(cpuStats) > 0 {
+		info.CPU = cpuStats[0].ModelName
 		mhz := cpuStats[0].Mhz
 		if mhz > 1000 {
 			info.CPUSpeed = fmt.Sprintf("%.2f GHz", mhz/1000.0)
 		} else {
 			info.CPUSpeed = fmt.Sprintf("%.0f MHz", mhz)
 		}
+	} else {
+		info.CPU = "Unknown Processor"
 	}
-	cores, _ := cpu.Counts(false) // Physical cores
-	threads, _ := cpu.Counts(true) // Logical cores (threads)
+
+	cores, _ := cpu.Counts(false)
+	threads, _ := cpu.Counts(true)
 	info.CoresThreads = fmt.Sprintf("%d/%d", cores, threads)
 
 	if !isFast {
-		percentages, err := cpu.Percent(150*time.Millisecond, false)
+		percentages, err := cpu.Percent(100*time.Millisecond, false)
 		if err == nil && len(percentages) > 0 {
 			info.CPUUsage = fmt.Sprintf("%.1f%%", percentages[0])
 		} else {
@@ -192,8 +270,79 @@ func gatherCPUInfo(info *SystemInfo, wg *sync.WaitGroup, isFast bool) {
 	}
 }
 
+func getLinuxMemoryInfo() (ram string, swap string, err error) {
+	file, err := os.Open("/proc/meminfo")
+	if err != nil {
+		return "", "", err
+	}
+	defer file.Close()
+
+	memMap := make(map[string]uint64)
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) == 2 {
+			key := strings.TrimSpace(parts[0])
+			valStr := strings.TrimSpace(parts[1])
+			valStr = strings.TrimSuffix(valStr, " kB")
+			val, err := strconv.ParseUint(valStr, 10, 64)
+			if err == nil {
+				memMap[key] = val * 1024 // convert to bytes
+			}
+		}
+	}
+
+	total := memMap["MemTotal"]
+	if total == 0 {
+		return "", "", fmt.Errorf("invalid MemTotal")
+	}
+
+	free := memMap["MemFree"]
+	buffers := memMap["Buffers"]
+	cached := memMap["Cached"]
+	available, ok := memMap["MemAvailable"]
+
+	var used uint64
+	if ok {
+		used = total - available
+	} else {
+		used = total - free - buffers - cached
+	}
+
+	usedPercent := (float64(used) / float64(total)) * 100
+	usedGB := float64(used) / (1 << 30)
+	totalGB := float64(total) / (1 << 30)
+	ram = fmt.Sprintf("%.1fGB / %.1fGB (%.0f%%)", usedGB, totalGB, usedPercent)
+
+	swapTotal := memMap["SwapTotal"]
+	if swapTotal > 0 {
+		swapFree := memMap["SwapFree"]
+		swapUsed := swapTotal - swapFree
+		swapUsedPercent := (float64(swapUsed) / float64(swapTotal)) * 100
+		swapUsedGB := float64(swapUsed) / (1 << 30)
+		swapTotalGB := float64(swapTotal) / (1 << 30)
+		swap = fmt.Sprintf("%.1fGB / %.1fGB (%.1f%%)", swapUsedGB, swapTotalGB, swapUsedPercent)
+	} else {
+		swap = "None"
+	}
+
+	return ram, swap, nil
+}
+
 func gatherMemoryInfo(info *SystemInfo, wg *sync.WaitGroup) {
 	defer wg.Done()
+
+	if runtime.GOOS == "linux" {
+		ram, swap, err := getLinuxMemoryInfo()
+		if err == nil {
+			info.RAM = ram
+			info.Swap = swap
+			return
+		}
+	}
+
+	// Fallback to gopsutil
 	v, err := mem.VirtualMemory()
 	if err == nil {
 		usedGB := float64(v.Used) / (1 << 30)
@@ -210,14 +359,45 @@ func gatherMemoryInfo(info *SystemInfo, wg *sync.WaitGroup) {
 	}
 }
 
+func parseOSRelease() map[string]string {
+	fields := make(map[string]string)
+	content, err := os.ReadFile("/etc/os-release")
+	if err != nil {
+		return fields
+	}
+	lines := strings.Split(string(content), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) == 2 {
+			key := strings.TrimSpace(parts[0])
+			val := strings.TrimSpace(parts[1])
+			if strings.HasPrefix(val, "\"") && strings.HasSuffix(val, "\"") {
+				val = val[1 : len(val)-1]
+			} else if strings.HasPrefix(val, "'") && strings.HasSuffix(val, "'") {
+				val = val[1 : len(val)-1]
+			}
+			fields[key] = val
+		}
+	}
+	return fields
+}
+
 func getOSInfo() string {
 	switch runtime.GOOS {
 	case "linux":
-		if content, err := os.ReadFile("/etc/os-release"); err == nil {
-			re := regexp.MustCompile(`PRETTY_NAME="([^"]+)"`)
-			if match := re.FindStringSubmatch(string(content)); len(match) > 1 {
-				return match[1]
+		fields := parseOSRelease()
+		if pretty, ok := fields["PRETTY_NAME"]; ok && pretty != "" {
+			return pretty
+		}
+		if name, ok := fields["NAME"]; ok && name != "" {
+			if version, ok := fields["VERSION"]; ok && version != "" {
+				return name + " " + version
 			}
+			return name
 		}
 		platform, _, version, _ := host.PlatformInformation()
 		if platform != "" && version != "" {
@@ -287,17 +467,48 @@ func getShell() string {
 	return titleName
 }
 
+func getLinuxGPU() string {
+	cmd := exec.Command("lspci", "-mm")
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(string(out), "\n")
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		lower := strings.ToLower(line)
+		if strings.Contains(lower, "vga") || strings.Contains(lower, "3d") || strings.Contains(lower, "display") {
+			parts := strings.Split(line, "\"")
+			vendor := ""
+			device := ""
+			if len(parts) > 3 {
+				vendor = parts[3]
+			}
+			if len(parts) > 5 {
+				device = parts[5]
+			}
+			device = strings.TrimPrefix(device, "[")
+			device = strings.TrimSuffix(device, "]")
+			if vendor != "" && device != "" {
+				return vendor + " " + device
+			} else if vendor != "" {
+				return vendor
+			} else if device != "" {
+				return device
+			}
+		}
+	}
+	return ""
+}
+
 func getGPUInfo() string {
 	switch runtime.GOOS {
 	case "windows":
 		return runShellCommand("(Get-CimInstance Win32_VideoController).Caption")
 	case "linux":
-		output := runShellCommand("lspci -mm | grep -i 'VGA\\|3D\\|Display' | head -n1 | cut -d '\"' -f2,4 | sed 's/\" \"/ /'")
-		if output != "" {
-			return output
-		}
-		output = runShellCommand("lspci | grep -i 'VGA\\|3D\\|Display' | head -n1 | cut -d ':' -f3 | sed 's/ (rev ..)//;s/\\[.*\\]//'")
-		return strings.TrimSpace(output)
+		return getLinuxGPU()
 	case "darwin":
 		output := runShellCommand("system_profiler SPDisplaysDataType | grep 'Chipset Model' | cut -d ':' -f2")
 		return strings.TrimSpace(output)
@@ -312,7 +523,7 @@ func getOpenPorts() string {
 	}
 	portSet := make(map[string]struct{})
 	for _, conn := range conns {
-		if conn.Status == "LISTEN" && conn.Laddr.IP != "::" && conn.Laddr.IP != "0.0.0.0" {
+		if conn.Status == "LISTEN" {
 			portSet[strconv.Itoa(int(conn.Laddr.Port))] = struct{}{}
 		}
 	}
@@ -329,7 +540,7 @@ func getOpenPorts() string {
 	for _, p := range ports {
 		portStrings = append(portStrings, strconv.Itoa(p))
 	}
-	limit := 5
+	limit := 8
 	if len(portStrings) > limit {
 		return strings.Join(portStrings[:limit], ", ") + "..."
 	}
@@ -344,7 +555,8 @@ func getInstalledLanguages() string {
 	}
 	var installed []string
 	var wg sync.WaitGroup
-	mu := &sync.Mutex{}
+	var mu sync.Mutex
+
 	for _, lang := range langs {
 		wg.Add(1)
 		go func(l string) {
@@ -383,6 +595,51 @@ func getIPAddress() string {
 	return conn.LocalAddr().(*net.UDPAddr).IP.String()
 }
 
+func getLinuxResolution() string {
+	if os.Getenv("DISPLAY") == "" {
+		if os.Getenv("WAYLAND_DISPLAY") != "" {
+			files, err := os.ReadDir("/sys/class/drm")
+			if err == nil {
+				for _, f := range files {
+					if strings.HasPrefix(f.Name(), "card") && !strings.Contains(f.Name(), "-") {
+						outputs, err := os.ReadDir("/sys/class/drm/" + f.Name())
+						if err == nil {
+							for _, out := range outputs {
+								if strings.Contains(out.Name(), "-") {
+									modeFile := "/sys/class/drm/" + f.Name() + "/" + out.Name() + "/modes"
+									if content, err := os.ReadFile(modeFile); err == nil {
+										lines := strings.Split(string(content), "\n")
+										if len(lines) > 0 && lines[0] != "" {
+											return strings.TrimSpace(lines[0])
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+			return "Wayland (Generic)"
+		}
+		return "Headless"
+	}
+	cmd := exec.Command("xrandr", "--current")
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(string(out), "\n")
+	for _, line := range lines {
+		if strings.Contains(line, "*") {
+			fields := strings.Fields(line)
+			if len(fields) > 0 {
+				return fields[0]
+			}
+		}
+	}
+	return ""
+}
+
 func getResolution() string {
 	switch runtime.GOOS {
 	case "windows":
@@ -391,16 +648,7 @@ func getResolution() string {
 			return output
 		}
 	case "linux":
-		if os.Getenv("DISPLAY") != "" {
-			output := runShellCommand("xrandr --current | grep '*' | uniq | awk '{print $1}'")
-			if output != "" {
-				return output
-			}
-		}
-		if os.Getenv("WAYLAND_DISPLAY") != "" {
-			return "Wayland (res?)"
-		}
-		return "Headless"
+		return getLinuxResolution()
 	case "darwin":
 		output := runShellCommand("system_profiler SPDisplaysDataType | grep Resolution | awk '{print $2\"x\"$4}'")
 		return strings.TrimSpace(output)
@@ -422,6 +670,42 @@ func getTerminal() string {
 	return "Unknown"
 }
 
+func getLinuxWM() string {
+	desktopSession := os.Getenv("DESKTOP_SESSION")
+	if desktopSession != "" {
+		lowerSession := strings.ToLower(desktopSession)
+		if strings.Contains(lowerSession, "gnome") {
+			return "Mutter (X11)"
+		}
+		if strings.Contains(lowerSession, "kde") || strings.Contains(lowerSession, "plasma") {
+			return "KWin (X11)"
+		}
+		if strings.Contains(lowerSession, "xfce") {
+			return "Xfwm4"
+		}
+		if strings.Contains(lowerSession, "cinnamon") {
+			return "Muffin"
+		}
+		if strings.Contains(lowerSession, "mate") {
+			return "Marco"
+		}
+		if strings.Contains(lowerSession, "lxqt") {
+			return "Openbox"
+		}
+		return strings.Title(desktopSession)
+	}
+	cmd := exec.Command("wmctrl", "-m")
+	if out, err := cmd.Output(); err == nil {
+		lines := strings.Split(string(out), "\n")
+		for _, line := range lines {
+			if strings.HasPrefix(line, "Name:") {
+				return strings.TrimSpace(strings.TrimPrefix(line, "Name:"))
+			}
+		}
+	}
+	return "Unknown"
+}
+
 func getWindowManager() string {
 	if runtime.GOOS == "linux" {
 		if os.Getenv("WAYLAND_DISPLAY") != "" {
@@ -429,29 +713,19 @@ func getWindowManager() string {
 			if session == "wayland" {
 				currentDesktop := os.Getenv("XDG_CURRENT_DESKTOP")
 				switch strings.ToLower(currentDesktop) {
-				case "gnome": return "Mutter (Wayland)"
-				case "kde": return "KWin (Wayland)"
-				case "sway": return "Sway"
-				case "wlroots": return "wlroots based"
+				case "gnome":
+					return "Mutter (Wayland)"
+				case "kde":
+					return "KWin (Wayland)"
+				case "sway":
+					return "Sway"
+				case "wlroots":
+					return "wlroots based"
 				}
 				return "Wayland"
 			}
 		}
-		desktopSession := os.Getenv("DESKTOP_SESSION")
-		if desktopSession != "" {
-			lowerSession := strings.ToLower(desktopSession)
-			if strings.Contains(lowerSession, "gnome") { return "Mutter (X11)" }
-			if strings.Contains(lowerSession, "kde") || strings.Contains(lowerSession, "plasma") { return "KWin (X11)" }
-			if strings.Contains(lowerSession, "xfce") { return "Xfwm4" }
-			if strings.Contains(lowerSession, "cinnamon") { return "Muffin" }
-			if strings.Contains(lowerSession, "mate") { return "Marco" }
-			if strings.Contains(lowerSession, "lxqt") { return "Openbox" }
-			return strings.Title(desktopSession)
-		}
-		if wm := runShellCommand("wmctrl -m | grep 'Name:'"); wm != "" {
-			return strings.TrimSpace(strings.Split(wm, ":")[1])
-		}
-		return "Unknown (X11?)"
+		return getLinuxWM()
 	} else if runtime.GOOS == "windows" {
 		return "DWM"
 	} else if runtime.GOOS == "darwin" {
@@ -485,57 +759,139 @@ func getDesktopEnvironment() string {
 }
 
 func getPackageCounts() string {
-	var checkers map[string]string
-	switch runtime.GOOS {
-	case "linux":
-		checkers = map[string]string{
-			"APT": "dpkg-query -f . -W | wc -l", "Pacman": "pacman -Qq --color never | wc -l",
-			"DNF": "dnf list installed --quiet | wc -l", "Flatpak": "flatpak list --app --columns=application | wc -l",
-			"Snap": "snap list | tail -n +2 | wc -l",
-		}
-	case "darwin":
-		checkers = map[string]string{
-			"Brew": "brew list --formula | wc -l",
-			"Cask": "brew list --cask | wc -l",
-		}
-	case "windows":
-		checkers = map[string]string{
-			"Choco": "(choco list -l | Measure-Object).Count", "Winget": "(winget list | Measure-Object).Count",
-			"Scoop": "(scoop list | Measure-Object).Count",
-		}
-	default:
-		return "None detected"
-	}
+	var results []string
 	var wg sync.WaitGroup
-	results := make(chan string, len(checkers))
-	for name, cmd := range checkers {
-		wg.Add(1)
-		go func(n, c string) {
-			defer wg.Done()
-			baseCmd := strings.Fields(strings.Split(c, "|")[0])[0]
-			if _, err := exec.LookPath(baseCmd); err != nil && baseCmd != "(" {
-				return
+	var mu sync.Mutex
+
+	type pmCheck struct {
+		name string
+		f    func() int
+	}
+
+	checks := []pmCheck{
+		{"Pacman", func() int {
+			files, err := os.ReadDir("/var/lib/pacman/local")
+			if err != nil {
+				return 0
 			}
-			countStr := runShellCommand(c)
-			if countStr != "" {
-				countStr = strings.TrimSpace(countStr)
-				if count, err := strconv.Atoi(countStr); err == nil && count > 0 {
-					results <- fmt.Sprintf("%s (%d)", n, count)
+			count := 0
+			for _, f := range files {
+				if f.IsDir() && !strings.HasPrefix(f.Name(), ".") {
+					count++
 				}
 			}
-		}(name, cmd)
+			return count
+		}},
+		{"APT", func() int {
+			file, err := os.Open("/var/lib/dpkg/status")
+			if err != nil {
+				return 0
+			}
+			defer file.Close()
+			count := 0
+			scanner := bufio.NewScanner(file)
+			for scanner.Scan() {
+				if strings.HasPrefix(scanner.Text(), "Package: ") {
+					count++
+				}
+			}
+			return count
+		}},
+		{"Flatpak", func() int {
+			count := 0
+			if dirs, err := os.ReadDir("/var/lib/flatpak/app"); err == nil {
+				for _, d := range dirs {
+					if d.IsDir() && !strings.HasPrefix(d.Name(), ".") {
+						count++
+					}
+				}
+			}
+			home := os.Getenv("HOME")
+			if home != "" {
+				if dirs, err := os.ReadDir(home + "/.local/share/flatpak/app"); err == nil {
+					for _, d := range dirs {
+						if d.IsDir() && !strings.HasPrefix(d.Name(), ".") {
+							count++
+						}
+					}
+				}
+			}
+			return count
+		}},
+		{"Snap", func() int {
+			files, err := os.ReadDir("/var/lib/snapd/snaps")
+			if err != nil {
+				return 0
+			}
+			count := 0
+			for _, f := range files {
+				if !f.IsDir() && strings.HasSuffix(f.Name(), ".snap") {
+					count++
+				}
+			}
+			return count
+		}},
+		{"Brew", func() int {
+			count := 0
+			for _, path := range []string{"/opt/homebrew/Cellar", "/usr/local/Cellar", "/home/linuxbrew/.linuxbrew/Cellar"} {
+				if dirs, err := os.ReadDir(path); err == nil {
+					for _, d := range dirs {
+						if d.IsDir() && !strings.HasPrefix(d.Name(), ".") {
+							count++
+						}
+					}
+				}
+			}
+			for _, path := range []string{"/opt/homebrew/Caskroom", "/usr/local/Caskroom", "/home/linuxbrew/.linuxbrew/Caskroom"} {
+				if dirs, err := os.ReadDir(path); err == nil {
+					for _, d := range dirs {
+						if d.IsDir() && !strings.HasPrefix(d.Name(), ".") {
+							count++
+						}
+					}
+				}
+			}
+			return count
+		}},
+		{"RPM", func() int {
+			if _, err := exec.LookPath("rpm"); err != nil {
+				return 0
+			}
+			cmd := exec.Command("rpm", "-qa")
+			out, err := cmd.Output()
+			if err != nil {
+				return 0
+			}
+			lines := strings.Split(string(out), "\n")
+			count := 0
+			for _, line := range lines {
+				if strings.TrimSpace(line) != "" {
+					count++
+				}
+			}
+			return count
+		}},
 	}
+
+	for _, check := range checks {
+		wg.Add(1)
+		go func(c pmCheck) {
+			defer wg.Done()
+			count := c.f()
+			if count > 0 {
+				mu.Lock()
+				results = append(results, fmt.Sprintf("%s (%d)", c.name, count))
+				mu.Unlock()
+			}
+		}(check)
+	}
+
 	wg.Wait()
-	close(results)
-	var parts []string
-	for res := range results {
-		parts = append(parts, res)
-	}
-	sort.Strings(parts)
-	if len(parts) == 0 {
+	sort.Strings(results)
+	if len(results) == 0 {
 		return "None detected"
 	}
-	return strings.Join(parts, ", ")
+	return strings.Join(results, ", ")
 }
 
 func getDisk() string {
@@ -594,7 +950,7 @@ func getPrimaryMACAddress() string {
 
 func getPublicIPInfo() (ip, isp, city, country string, err error) {
 	client := http.Client{
-		Timeout: 800 * time.Millisecond,
+		Timeout: 400 * time.Millisecond,
 	}
 	resp, err := client.Get("http://ip-api.com/json/")
 	if err != nil {
@@ -654,74 +1010,76 @@ func getDNSServers() []string {
 	return dnsServers
 }
 
-func getPingTime(host string) string {
-	pinger, err := ping.NewPinger(host)
+func getSystemPingTime(host string) string {
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = exec.Command("ping", "-n", "1", "-w", "400", host)
+	} else if runtime.GOOS == "darwin" {
+		cmd = exec.Command("ping", "-c", "1", "-t", "1", host)
+	} else {
+		cmd = exec.Command("ping", "-c", "1", "-W", "1", host)
+	}
+	out, err := cmd.Output()
 	if err != nil {
-		return fmt.Sprintf("%s: Error", host)
+		return "Failed"
 	}
 
-	pinger.Count = 1
-	pinger.Timeout = 800 * time.Millisecond
-	pinger.SetPrivileged(runtime.GOOS != "windows")
-
-	err = pinger.Run()
-	if err != nil {
-        if strings.Contains(err.Error(), "operation not permitted") || strings.Contains(err.Error(), "requires administrator privileges") {
-             return fmt.Sprintf("%s: Need Privileges", host)
-        }
-		return fmt.Sprintf("%s: Failed", host)
+	outputStr := string(out)
+	if runtime.GOOS == "windows" {
+		re := regexp.MustCompile(`Average\s*=\s*(\d+)ms`)
+		matches := re.FindStringSubmatch(outputStr)
+		if len(matches) > 1 {
+			return fmt.Sprintf("%s ms", matches[1])
+		}
+	} else {
+		re := regexp.MustCompile(`(rtt|round-trip)\s+min/avg/max/(mdev|stddev)\s+=\s+([0-9.]+)/([0-9.]+)/([0-9.]+)/([0-9.]+)`)
+		matches := re.FindStringSubmatch(outputStr)
+		if len(matches) > 4 {
+			return fmt.Sprintf("%s ms", matches[4])
+		}
+		re2 := regexp.MustCompile(`time=([0-9.]+)`)
+		matches2 := re2.FindStringSubmatch(outputStr)
+		if len(matches2) > 1 {
+			return fmt.Sprintf("%s ms", matches2[1])
+		}
 	}
-
-	stats := pinger.Statistics()
-	if stats.PacketsRecv > 0 {
-		return fmt.Sprintf("%s: %.1f ms", host, float64(stats.AvgRtt.Microseconds())/1000.0)
-	}
-	return fmt.Sprintf("%s: Timeout", host)
+	return "Timeout"
 }
 
-// ** NEW FUNCTION **
 func getIOCounters() string {
-	// true = per interface
 	counters, err := psnet.IOCounters(true)
 	if err != nil {
 		return "N/A"
 	}
-	
-	// Get list of interfaces
+
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return "N/A"
 	}
-	
-	// Find the primary, active, non-loopback interface
+
 	for _, iface := range ifaces {
-		// Skip down, loopback, and virtual interfaces
 		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 || strings.Contains(strings.ToLower(iface.Name), "virtual") || strings.Contains(strings.ToLower(iface.Name), "docker") || strings.HasPrefix(iface.Name, "veth") {
 			continue
 		}
-		
-		// Find the counters for this interface
+
 		for _, counter := range counters {
 			if counter.Name == iface.Name {
-				// Found it. Format and return.
-				return fmt.Sprintf("%s (Sent: %s, Recv: %s)", 
-					iface.Name, 
-					formatBytes(counter.BytesSent), 
+				return fmt.Sprintf("%s (Sent: %s, Recv: %s)",
+					iface.Name,
+					formatBytes(counter.BytesSent),
 					formatBytes(counter.BytesRecv))
 			}
 		}
 	}
-	
-	// Fallback to all (sum of) interfaces if no clear primary found
+
 	if len(counters) > 0 {
 		return fmt.Sprintf("All (Sent: %s, Recv: %s)",
-			formatBytes(counters[0].BytesSent), 
+			formatBytes(counters[0].BytesSent),
 			formatBytes(counters[0].BytesRecv))
 	}
 
 	return "N/A"
 }
-
 
 // --- Main Orchestration Functions ---
 
@@ -744,8 +1102,27 @@ func GetSystemInfo(isFast bool) *SystemInfo {
 		"Virtualization": &info.Virtualization,
 	}
 	fastTaskFuncs := map[string]func() string{
-		"Shell": getShell, "GPU": getGPUInfo, "Disk": getDisk, "IPAddress": getIPAddress,
-		"Locale": getSystemLocale, "Resolution": getResolution, "WindowManager": getWindowManager,
+		"Shell": getShell,
+		"GPU": func() string {
+			if runtime.GOOS == "linux" {
+				return getLinuxGPU()
+			}
+			return getGPUInfo()
+		},
+		"Disk": getDisk, "IPAddress": getIPAddress,
+		"Locale": getSystemLocale,
+		"Resolution": func() string {
+			if runtime.GOOS == "linux" {
+				return getLinuxResolution()
+			}
+			return getResolution()
+		},
+		"WindowManager": func() string {
+			if runtime.GOOS == "linux" {
+				return getLinuxWM()
+			}
+			return getWindowManager()
+		},
 		"DE": getDesktopEnvironment, "Terminal": getTerminal, "Go": getGoVersion,
 		"Virtualization": getVirtualization,
 	}
@@ -786,60 +1163,75 @@ func GetSystemInfo(isFast bool) *SystemInfo {
 
 // GetProcessList fetches information about running processes. (Exported)
 func GetProcessList() ([]ProcessInfo, error) {
-	pids, err := process.Pids()
+	allProcs, err := process.Processes()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get PIDs: %w", err)
+		return nil, fmt.Errorf("failed to get processes: %w", err)
 	}
 
-	var processList []ProcessInfo
 	var wg sync.WaitGroup
-	results := make(chan ProcessInfo, len(pids))
+	results := make(chan ProcessInfo, len(allProcs))
+	sem := make(chan struct{}, 32) // Limit concurrency to avoid FD exhaustion
 
-	// Prime CPU Percent calculation
-	allProcs, _ := process.Processes()
+	// Step 1: Prime the CPU percent calculation by calling it once on all processes.
 	for _, p := range allProcs {
-		_, _ = p.CPUPercent() // Initial call to start measurement
-	}
-	time.Sleep(150 * time.Millisecond) // Adjusted sleep duration
-
-
-	for _, pid := range pids {
 		wg.Add(1)
-		go func(p int32) {
+		go func(proc *process.Process) {
 			defer wg.Done()
-			proc, err := process.NewProcess(p)
-			if err != nil {
+			sem <- struct{}{}
+			_, _ = proc.CPUPercent()
+			<-sem
+		}(p)
+	}
+	wg.Wait()
+
+	// Step 2: Sleep to allow CPU usage to accumulate.
+	time.Sleep(100 * time.Millisecond)
+
+	// Step 3: Call CPUPercent on the same instances to get the actual CPU usage.
+	for _, p := range allProcs {
+		wg.Add(1)
+		go func(proc *process.Process) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			pid := proc.Pid
+			name, err := proc.Name()
+			if err != nil || name == "" || pid <= 1 {
 				return
 			}
 
-			name, _ := proc.Name() 
-			if name == "" || p <= 1 || (runtime.GOOS == "linux" && strings.HasPrefix(name, "[") ) || name == "kernel_task" || name == "systemd" || name == "init" || name == "idle" {
+			// Exclude common system/idle processes to keep the list clean
+			if runtime.GOOS == "linux" && (strings.HasPrefix(name, "[") || name == "systemd" || name == "init") {
 				return
 			}
-
+			if name == "kernel_task" || name == "idle" {
+				return
+			}
 
 			cpuPerc, err := proc.CPUPercent()
 			if err != nil {
-                cpuPerc = 0.0
-            }
+				cpuPerc = 0.0
+			}
 			memInfo, errMem := proc.MemoryInfo()
 			memPerc, errMemPerc := proc.MemoryPercent()
 
 			if errMem == nil && errMemPerc == nil && memInfo != nil {
 				results <- ProcessInfo{
-					PID:     p,
+					PID:     pid,
 					Name:    name,
 					CPU:     cpuPerc,
 					RAM:     memInfo.RSS,
 					RAMPerc: memPerc,
 				}
 			}
-		}(pid)
+		}(p)
 	}
 
 	wg.Wait()
 	close(results)
 
+	var processList []ProcessInfo
 	for pInfo := range results {
 		if pInfo.CPU > 0.05 || pInfo.RAMPerc > 0.1 {
 			processList = append(processList, pInfo)
@@ -871,7 +1263,7 @@ func GetNetworkDetails() (*NetworkInfo, error) {
 
 	go func() {
 		defer wg.Done()
-		info.Ping = getPingTime("1.1.1.1") // Ping Cloudflare
+		info.Ping = getSystemPingTime("1.1.1.1")
 	}()
 
 	go func() {
@@ -887,9 +1279,8 @@ func GetNetworkDetails() (*NetworkInfo, error) {
 		info.PrivateIP = getIPAddress()
 		info.MACAddress = getPrimaryMACAddress()
 		info.Proxy = getProxyInfo()
-		info.IOCounters = getIOCounters() // ** ADDED **
+		info.IOCounters = getIOCounters()
 	}()
-
 
 	wg.Wait()
 
@@ -898,8 +1289,6 @@ func GetNetworkDetails() (*NetworkInfo, error) {
 		info.ISP = "Error"
 		info.City = "Error"
 		info.Country = "Error"
-		// This now runs in the background, so we just log the error
-		// fmt.Fprintf(os.Stderr, "Warning: Could not fetch public IP info: %v\n", errPublicIP)
 	}
 
 	return info, nil
