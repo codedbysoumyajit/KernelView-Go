@@ -52,9 +52,13 @@ func main() {
 	flag.BoolVar(&processFlag, "process", false, "Display list of running processes.")
 	flag.BoolVar(&processFlag, "p", false, "Display list of running processes (shorthand).")
 
-	var networkFlag bool // New network flag
+	var networkFlag bool
 	flag.BoolVar(&networkFlag, "network", false, "Display detailed network information.")
 	flag.BoolVar(&networkFlag, "n", false, "Display detailed network information (shorthand).")
+
+	var liveFlag bool
+	flag.BoolVar(&liveFlag, "live", false, "Start real-time live system monitoring dashboard.")
+	flag.BoolVar(&liveFlag, "l", false, "Start real-time live system monitoring dashboard (shorthand).")
 
 	var versionFlag bool
 	flag.BoolVar(&versionFlag, "version", false, "Print the version and exit.")
@@ -69,13 +73,17 @@ func main() {
 
 	// Custom usage message
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage of %s:\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "  %s [flags]\n\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "Flags:\n")
-		flag.PrintDefaults()
-		fmt.Fprintf(os.Stderr, "\nDescription:\n")
-		fmt.Fprintf(os.Stderr, "  KernelView Go displays system, process, or network information.\n")
-		fmt.Fprintf(os.Stderr, "  Modes are mutually exclusive (-f, -p, -n).\n")
+		earlyNoColor := false
+		for _, arg := range os.Args {
+			if arg == "--no-color" {
+				earlyNoColor = true
+				break
+			}
+		}
+		if os.Getenv("NO_COLOR") != "" {
+			earlyNoColor = true
+		}
+		display.PrintHelp(version, earlyNoColor)
 	}
 
 	flag.Parse()
@@ -85,6 +93,12 @@ func main() {
 	// 1. Version flag
 	if versionFlag {
 		fmt.Println("KernelView Go " + version)
+		os.Exit(0)
+	}
+
+	// 2. Real-time Live TUI Dashboard
+	if liveFlag {
+		display.StartLiveDashboard(fastFlag)
 		os.Exit(0)
 	}
 

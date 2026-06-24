@@ -647,3 +647,73 @@ func DisplayNetworkInfo(info *gather.NetworkInfo, theme Theme) {
 
 	DisplayLayout(distroKey, infoLines, theme)
 }
+
+// PrintHelp prints a distro-themed, highly aesthetic help screen to stdout.
+func PrintHelp(version string, noColor bool) {
+	distroKey := getDistroKey()
+	theme := GetThemeForDistro(distroKey, noColor)
+
+	title := " KernelView Go - System Fetch & Live Dashboard "
+	verStr := fmt.Sprintf(" Version: %s (Detected: %s)", version, distroKey)
+
+	// Print visual box header themed with distro primary colors
+	fmt.Printf("%s╭────────────────────────────────────────────────────────╮%s\n", theme.Accent, theme.Reset)
+	fmt.Printf("%s│%s%s%s%s%s│%s\n",
+		theme.Accent,
+		theme.Reset,
+		"\033[1m",
+		fmt.Sprintf("  %-54s", title),
+		theme.Reset,
+		theme.Accent,
+		theme.Reset,
+	)
+	fmt.Printf("%s│%s%s%s%s│%s\n",
+		theme.Accent,
+		theme.Reset,
+		theme.Value,
+		fmt.Sprintf("  %-54s", verStr),
+		theme.Accent,
+		theme.Reset,
+	)
+	fmt.Printf("%s╰────────────────────────────────────────────────────────╯%s\n\n", theme.Accent, theme.Reset)
+
+	// Section 1: Usage
+	fmt.Printf("%sUSAGE:%s\n", theme.Accent, theme.Reset)
+	fmt.Printf("  kernelview [flags]\n\n")
+
+	// Section 2: Display Modes
+	fmt.Printf("%sDISPLAY MODES:%s\n", theme.Accent, theme.Reset)
+	fmt.Printf("  %s-l, --live%s         %sStart real-time TUI dashboard (interactive, multi-tab)%s\n", theme.Key, theme.Reset, theme.Value, theme.Reset)
+	fmt.Printf("  %s-p, --process%s      %sDisplay static list of running processes%s\n", theme.Key, theme.Reset, theme.Value, theme.Reset)
+	fmt.Printf("  %s-n, --network%s      %sDisplay detailed static network interfaces & stats%s\n", theme.Key, theme.Reset, theme.Value, theme.Reset)
+	fmt.Printf("  %s[default]%s          %sDisplay system fetch (fastfetch-like distro ASCII logo & specs)%s\n\n", theme.Key, theme.Reset, theme.Value, theme.Reset)
+
+	// Section 3: Configuration Options
+	fmt.Printf("%sCONFIGURATION OPTIONS:%s\n", theme.Accent, theme.Reset)
+	fmt.Printf("  %s-f, --fast%s         %sRun system fetch in fast mode (skips slow subsystem checks)%s\n", theme.Key, theme.Reset, theme.Value, theme.Reset)
+	fmt.Printf("  %s--json%s             %sOutput information as structured JSON%s\n", theme.Key, theme.Reset, theme.Value, theme.Reset)
+	fmt.Printf("  %s--no-color%s         %sDisable all ANSI color formatting%s\n\n", theme.Key, theme.Reset, theme.Value, theme.Reset)
+
+	// Section 4: Information Flags
+	fmt.Printf("%sINFO FLAGS:%s\n", theme.Accent, theme.Reset)
+	fmt.Printf("  %s-v, --version%s      %sPrint version and build information%s\n", theme.Key, theme.Reset, theme.Value, theme.Reset)
+	fmt.Printf("  %s-h, --help%s         %sPrint this aesthetic help menu%s\n\n", theme.Key, theme.Reset, theme.Value, theme.Reset)
+
+	// Section 5: TUI Interactive Keys
+	fmt.Printf("%sTUI INTERACTIVE KEYS:%s\n", theme.Accent, theme.Reset)
+	fmt.Printf("  %s[1]%s Dashboard Tab   %s[2]%s Processes Tab   %s[3]%s Network Tab   %s[4]%s CPU Cores Tab   %s[Q]%s Quit\n\n",
+		theme.Key, theme.Reset, theme.Key, theme.Reset, theme.Key, theme.Reset, theme.Key, theme.Reset, theme.Key, theme.Reset)
+
+	// Section 6: Examples
+	fmt.Printf("%sEXAMPLES:%s\n", theme.Accent, theme.Reset)
+	fmt.Printf("  $ kernelview --live            %s# Open the live TUI dashboard%s\n", "\033[90m", theme.Reset)
+	fmt.Printf("  $ kernelview -p --json         %s# Fetch running processes in JSON format%s\n", "\033[90m", theme.Reset)
+	fmt.Printf("  $ kernelview -f                %s# Fast system fetch with ASCII logo%s\n\n", "\033[90m", theme.Reset)
+
+	// Footer with Color Grid blocks
+	blocks := getColorBlocks(theme)
+	if blocks != "" {
+		fmt.Printf("%s\n\n", blocks)
+	}
+}
+

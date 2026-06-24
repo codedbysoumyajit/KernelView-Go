@@ -115,7 +115,8 @@ func runShellCommand(command string) string {
 	return strings.TrimSpace(string(out))
 }
 
-func formatBytes(b uint64) string {
+// FormatBytes formats a byte count into a human-readable string (Exported)
+func FormatBytes(b uint64) string {
 	if b > (1 << 30) {
 		return fmt.Sprintf("%.1f GB", float64(b)/(1<<30))
 	}
@@ -473,6 +474,8 @@ func getLinuxGPU() string {
 	if err != nil {
 		return ""
 	}
+	var gpus []string
+	seen := make(map[string]bool)
 	lines := strings.Split(string(out), "\n")
 	for _, line := range lines {
 		if line == "" {
@@ -491,14 +494,24 @@ func getLinuxGPU() string {
 			}
 			device = strings.TrimPrefix(device, "[")
 			device = strings.TrimSuffix(device, "]")
+			
+			gpuName := ""
 			if vendor != "" && device != "" {
-				return vendor + " " + device
+				gpuName = vendor + " " + device
 			} else if vendor != "" {
-				return vendor
+				gpuName = vendor
 			} else if device != "" {
-				return device
+				gpuName = device
+			}
+
+			if gpuName != "" && !seen[gpuName] {
+				seen[gpuName] = true
+				gpus = append(gpus, gpuName)
 			}
 		}
+	}
+	if len(gpus) > 0 {
+		return strings.Join(gpus, ", ")
 	}
 	return ""
 }
@@ -506,12 +519,35 @@ func getLinuxGPU() string {
 func getGPUInfo() string {
 	switch runtime.GOOS {
 	case "windows":
-		return runShellCommand("(Get-CimInstance Win32_VideoController).Caption")
+		output := runShellCommand("(Get-CimInstance Win32_VideoController).Caption")
+		lines := strings.Split(output, "\n")
+		var gpus []string
+		for _, line := range lines {
+			t := strings.TrimSpace(line)
+			if t != "" {
+				gpus = append(gpus, t)
+			}
+		}
+		if len(gpus) > 0 {
+			return strings.Join(gpus, ", ")
+		}
+		return "Unknown"
 	case "linux":
 		return getLinuxGPU()
 	case "darwin":
 		output := runShellCommand("system_profiler SPDisplaysDataType | grep 'Chipset Model' | cut -d ':' -f2")
-		return strings.TrimSpace(output)
+		lines := strings.Split(output, "\n")
+		var gpus []string
+		for _, line := range lines {
+			t := strings.TrimSpace(line)
+			if t != "" {
+				gpus = append(gpus, t)
+			}
+		}
+		if len(gpus) > 0 {
+			return strings.Join(gpus, ", ")
+		}
+		return "Unknown"
 	}
 	return "Unknown"
 }
@@ -1066,16 +1102,16 @@ func getIOCounters() string {
 			if counter.Name == iface.Name {
 				return fmt.Sprintf("%s (Sent: %s, Recv: %s)",
 					iface.Name,
-					formatBytes(counter.BytesSent),
-					formatBytes(counter.BytesRecv))
+					FormatBytes(counter.BytesSent),
+					FormatBytes(counter.BytesRecv))
 			}
 		}
 	}
 
 	if len(counters) > 0 {
 		return fmt.Sprintf("All (Sent: %s, Recv: %s)",
-			formatBytes(counters[0].BytesSent),
-			formatBytes(counters[0].BytesRecv))
+			FormatBytes(counters[0].BytesSent),
+			FormatBytes(counters[0].BytesRecv))
 	}
 
 	return "N/A"
@@ -1293,3 +1329,508 @@ func GetNetworkDetails() (*NetworkInfo, error) {
 
 	return info, nil
 }
+
+// LiveMetrics holds real-time system stats (Exported)
+type LiveMetrics struct {
+	Uptime      string
+	CPUUsage    float64
+	CPUCores    []float64 // Per-core CPU percentages (Exported)
+	RAMUsed     uint64
+	RAMTotal    uint64
+	RAMPercent  float64
+	SwapUsed    uint64
+	SwapTotal   uint64
+	SwapPercent float64
+	DiskUsed    uint64
+	DiskTotal   uint64
+	DiskPercent float64
+	Temperature float64
+	NetRxSpeed  float64 // bytes/sec
+	NetTxSpeed  float64 // bytes/sec
+	NetRxTotal  uint64  // bytes
+	NetTxTotal  uint64  // bytes
+	NetIface    string
+	Processes   []ProcessInfo
+	GPUMetrics  LiveGPUMetrics // GPU telemetry details (Exported)
+}
+
+// LiveTracker tracks metrics across real-time updates (Exported)
+type LiveTracker struct {
+	procsMap          map[int32]*process.Process
+	prevNetRx         uint64
+	prevNetTx         uint64
+	prevNetTime       time.Time
+	mu                sync.Mutex
+	bootTime          time.Time
+
+	// Cached processes list
+	cachedProcesses   []ProcessInfo
+	lastProcUpdate    time.Time
+
+	// Cached disk usage
+	cachedDiskUsed    uint64
+	cachedDiskTotal   uint64
+	cachedDiskPercent float64
+	lastDiskUpdate    time.Time
+
+	// Cached temperature
+	cachedTemp        float64
+	lastTempUpdate    time.Time
+
+	// Cached net interface name
+	cachedNetIface    string
+	lastIfaceUpdate   time.Time
+
+	// Cached GPU metrics
+	cachedGPUMetrics  LiveGPUMetrics
+	lastGPUUpdate     time.Time
+}
+
+// NewLiveTracker creates a new tracker instance (Exported)
+func NewLiveTracker() *LiveTracker {
+	h, err := host.Info()
+	var bTime time.Time
+	if err == nil {
+		bTime = time.Unix(int64(h.BootTime), 0)
+	}
+	return &LiveTracker{
+		procsMap: make(map[int32]*process.Process),
+		bootTime: bTime,
+	}
+}
+
+// GetMetrics returns the calculated live metrics (Exported)
+func (lt *LiveTracker) GetMetrics() (*LiveMetrics, error) {
+	lt.mu.Lock()
+	defer lt.mu.Unlock()
+
+	metrics := &LiveMetrics{}
+
+	// 1. Uptime
+	if runtime.GOOS == "linux" {
+		uptime, err := getLinuxUptime()
+		if err == nil {
+			metrics.Uptime = uptime
+		}
+	}
+	if metrics.Uptime == "" {
+		if !lt.bootTime.IsZero() {
+			uptimeDuration := time.Since(lt.bootTime)
+			days := int(uptimeDuration.Hours() / 24)
+			hours := int(uptimeDuration.Hours()) % 24
+			minutes := int(uptimeDuration.Minutes()) % 60
+			if days > 0 {
+				metrics.Uptime = fmt.Sprintf("%d days, %d hours, %d mins", days, hours, minutes)
+			} else if hours > 0 {
+				metrics.Uptime = fmt.Sprintf("%d hours, %d mins", hours, minutes)
+			} else {
+				metrics.Uptime = fmt.Sprintf("%d mins", minutes)
+			}
+		}
+	}
+
+	// 2. CPU Usage & Per-Core Percentages (real-time, queried every 500ms)
+	percentages, err := cpu.Percent(0, true)
+	if err == nil && len(percentages) > 0 {
+		metrics.CPUCores = percentages
+		var sum float64
+		for _, p := range percentages {
+			sum += p
+		}
+		metrics.CPUUsage = sum / float64(len(percentages))
+	} else {
+		overall, err := cpu.Percent(0, false)
+		if err == nil && len(overall) > 0 {
+			metrics.CPUUsage = overall[0]
+		}
+	}
+
+	// 3. Memory (real-time, queried every 500ms)
+	if runtime.GOOS == "linux" {
+		file, err := os.Open("/proc/meminfo")
+		if err == nil {
+			memMap := make(map[string]uint64)
+			scanner := bufio.NewScanner(file)
+			for scanner.Scan() {
+				line := scanner.Text()
+				parts := strings.SplitN(line, ":", 2)
+				if len(parts) == 2 {
+					key := strings.TrimSpace(parts[0])
+					valStr := strings.TrimSpace(parts[1])
+					valStr = strings.TrimSuffix(valStr, " kB")
+					val, err := strconv.ParseUint(valStr, 10, 64)
+					if err == nil {
+						memMap[key] = val * 1024
+					}
+				}
+			}
+			file.Close()
+
+			total := memMap["MemTotal"]
+			if total > 0 {
+				free := memMap["MemFree"]
+				buffers := memMap["Buffers"]
+				cached := memMap["Cached"]
+				available, ok := memMap["MemAvailable"]
+
+				var used uint64
+				if ok {
+					used = total - available
+				} else {
+					used = total - free - buffers - cached
+				}
+
+				metrics.RAMTotal = total
+				metrics.RAMUsed = used
+				metrics.RAMPercent = (float64(used) / float64(total)) * 100
+
+				swapTotal := memMap["SwapTotal"]
+				if swapTotal > 0 {
+					swapFree := memMap["SwapFree"]
+					metrics.SwapTotal = swapTotal
+					metrics.SwapUsed = swapTotal - swapFree
+					metrics.SwapPercent = (float64(metrics.SwapUsed) / float64(swapTotal)) * 100
+				}
+			}
+		}
+	}
+	if metrics.RAMTotal == 0 {
+		v, err := mem.VirtualMemory()
+		if err == nil {
+			metrics.RAMTotal = v.Total
+			metrics.RAMUsed = v.Used
+			metrics.RAMPercent = v.UsedPercent
+		}
+		s, err := mem.SwapMemory()
+		if err == nil && s.Total > 0 {
+			metrics.SwapTotal = s.Total
+			metrics.SwapUsed = s.Used
+			metrics.SwapPercent = s.UsedPercent
+		}
+	}
+
+	// 4. Disk (cached for 5 seconds)
+	if time.Since(lt.lastDiskUpdate) >= 5*time.Second || lt.lastDiskUpdate.IsZero() {
+		d, err := disk.Usage("/")
+		if err == nil {
+			lt.cachedDiskTotal = d.Total
+			lt.cachedDiskUsed = d.Used
+			lt.cachedDiskPercent = d.UsedPercent
+			lt.lastDiskUpdate = time.Now()
+		}
+	}
+	metrics.DiskTotal = lt.cachedDiskTotal
+	metrics.DiskUsed = lt.cachedDiskUsed
+	metrics.DiskPercent = lt.cachedDiskPercent
+
+	// 5. Temperature (cached for 2 seconds)
+	if time.Since(lt.lastTempUpdate) >= 2*time.Second || lt.lastTempUpdate.IsZero() {
+		temps, err := host.SensorsTemperatures()
+		if err == nil && len(temps) > 0 {
+			found := false
+			for _, temp := range temps {
+				lowerKey := strings.ToLower(temp.SensorKey)
+				if strings.Contains(lowerKey, "core") || strings.Contains(lowerKey, "cpu") || strings.Contains(lowerKey, "package") {
+					lt.cachedTemp = temp.Temperature
+					found = true
+					break
+				}
+			}
+			if !found {
+				lt.cachedTemp = temps[0].Temperature
+			}
+			lt.lastTempUpdate = time.Now()
+		}
+	}
+	metrics.Temperature = lt.cachedTemp
+
+	// 6. Network Rates (Iface list cached for 10 seconds, stats queried every 500ms)
+	var rxTotal, txTotal uint64
+	var activeIface string
+	counters, err := psnet.IOCounters(true)
+	if err == nil {
+		if time.Since(lt.lastIfaceUpdate) >= 10*time.Second || lt.lastIfaceUpdate.IsZero() || lt.cachedNetIface == "" {
+			ifaces, err := net.Interfaces()
+			if err == nil {
+				for _, iface := range ifaces {
+					if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 || strings.Contains(strings.ToLower(iface.Name), "virtual") || strings.Contains(strings.ToLower(iface.Name), "docker") || strings.HasPrefix(iface.Name, "veth") {
+						continue
+					}
+					for _, counter := range counters {
+						if counter.Name == iface.Name {
+							lt.cachedNetIface = iface.Name
+							break
+						}
+					}
+					if lt.cachedNetIface != "" {
+						break
+					}
+				}
+				lt.lastIfaceUpdate = time.Now()
+			}
+		}
+		activeIface = lt.cachedNetIface
+		for _, counter := range counters {
+			if counter.Name == activeIface {
+				rxTotal = counter.BytesRecv
+				txTotal = counter.BytesSent
+				break
+			}
+		}
+	}
+
+	now := time.Now()
+	if !lt.prevNetTime.IsZero() {
+		elapsed := now.Sub(lt.prevNetTime).Seconds()
+		if elapsed > 0 {
+			if rxTotal >= lt.prevNetRx {
+				metrics.NetRxSpeed = float64(rxTotal-lt.prevNetRx) / elapsed
+			}
+			if txTotal >= lt.prevNetTx {
+				metrics.NetTxSpeed = float64(txTotal-lt.prevNetTx) / elapsed
+			}
+		}
+	}
+	lt.prevNetRx = rxTotal
+	lt.prevNetTx = txTotal
+	lt.prevNetTime = now
+	metrics.NetRxTotal = rxTotal
+	metrics.NetTxTotal = txTotal
+	metrics.NetIface = activeIface
+
+	// 7. GPU Telemetry (cached for 2 seconds)
+	if time.Since(lt.lastGPUUpdate) >= 2*time.Second || lt.lastGPUUpdate.IsZero() {
+		gpuMetrics, err := getGPUMetrics()
+		if err == nil {
+			lt.cachedGPUMetrics = gpuMetrics
+			lt.lastGPUUpdate = time.Now()
+		}
+	}
+	metrics.GPUMetrics = lt.cachedGPUMetrics
+
+	// 8. Processes (expensive, cached for 2 seconds)
+	if time.Since(lt.lastProcUpdate) >= 2*time.Second || lt.lastProcUpdate.IsZero() || len(lt.cachedProcesses) == 0 {
+		pids, err := process.Pids()
+		if err == nil {
+			currentPids := make(map[int32]bool)
+			for _, pid := range pids {
+				currentPids[pid] = true
+			}
+
+			for pid := range lt.procsMap {
+				if !currentPids[pid] {
+					delete(lt.procsMap, pid)
+				}
+			}
+
+			for _, pid := range pids {
+				if _, exists := lt.procsMap[pid]; !exists {
+					proc, err := process.NewProcess(pid)
+					if err == nil {
+						lt.procsMap[pid] = proc
+						_, _ = proc.CPUPercent()
+					}
+				}
+			}
+
+			var wg sync.WaitGroup
+			sem := make(chan struct{}, 32)
+			results := make(chan ProcessInfo, len(lt.procsMap))
+
+			for _, proc := range lt.procsMap {
+				wg.Add(1)
+				go func(p *process.Process) {
+					defer wg.Done()
+					sem <- struct{}{}
+					defer func() { <-sem }()
+
+					pid := p.Pid
+					name, err := p.Name()
+					if err != nil || name == "" || pid <= 1 {
+						return
+					}
+
+					if runtime.GOOS == "linux" && (strings.HasPrefix(name, "[") || name == "systemd" || name == "init") {
+						return
+					}
+					if name == "kernel_task" || name == "idle" {
+						return
+					}
+
+					cpuPerc, err := p.CPUPercent()
+					if err != nil {
+						cpuPerc = 0.0
+					}
+					memInfo, errMem := p.MemoryInfo()
+					memPerc, errMemPerc := p.MemoryPercent()
+
+					if errMem == nil && errMemPerc == nil && memInfo != nil {
+						results <- ProcessInfo{
+							PID:     pid,
+							Name:    name,
+							CPU:     cpuPerc,
+							RAM:     memInfo.RSS,
+							RAMPerc: memPerc,
+						}
+					}
+				}(proc)
+			}
+
+			wg.Wait()
+			close(results)
+
+			var procList []ProcessInfo
+			for pInfo := range results {
+				procList = append(procList, pInfo)
+			}
+
+			sort.Slice(procList, func(i, j int) bool {
+				if procList[i].CPU != procList[j].CPU {
+					return procList[i].CPU > procList[j].CPU
+				}
+				return procList[i].RAM > procList[j].RAM
+			})
+
+			lt.cachedProcesses = procList
+			lt.lastProcUpdate = time.Now()
+		}
+	}
+	metrics.Processes = lt.cachedProcesses
+
+	return metrics, nil
+}
+
+// LiveGPUMetrics holds real-time GPU stats (Exported)
+type LiveGPUMetrics struct {
+	HasGPU      bool
+	GPUUsage    float64
+	GPUMemUsage float64
+	GPUMemUsed  uint64 // MB or MHz (Intel)
+	GPUMemTotal uint64 // MB or MHz (Intel)
+	GPUTemp     float64 // °C
+}
+
+func getGPUMetrics() (LiveGPUMetrics, error) {
+	metrics := LiveGPUMetrics{}
+
+	// 1. Try Nvidia-smi first
+	if nvidia, err := getNvidiaGPUMetrics(); err == nil && nvidia.HasGPU {
+		return nvidia, nil
+	}
+
+	if runtime.GOOS == "linux" {
+		// 2. Try AMD GPU sysfs
+		for _, card := range []string{"card0", "card1"} {
+			busyPath := fmt.Sprintf("/sys/class/drm/%s/device/gpu_busy_percent", card)
+			if _, err := os.Stat(busyPath); err == nil {
+				busyBytes, err := os.ReadFile(busyPath)
+				if err == nil {
+					busyVal, err := strconv.ParseFloat(strings.TrimSpace(string(busyBytes)), 64)
+					if err == nil {
+						metrics.HasGPU = true
+						metrics.GPUUsage = busyVal
+
+						// Try VRAM utilization
+						memBusyPath := fmt.Sprintf("/sys/class/drm/%s/device/mem_busy_percent", card)
+						if memBytes, err := os.ReadFile(memBusyPath); err == nil {
+							if memVal, err := strconv.ParseFloat(strings.TrimSpace(string(memBytes)), 64); err == nil {
+								metrics.GPUMemUsage = memVal
+							}
+						}
+
+						// Try VRAM Used / Total
+						vramUsedPath := fmt.Sprintf("/sys/class/drm/%s/device/mem_info_vram_used", card)
+						vramTotalPath := fmt.Sprintf("/sys/class/drm/%s/device/mem_info_vram_total", card)
+						if uBytes, errU := os.ReadFile(vramUsedPath); errU == nil {
+							if tBytes, errT := os.ReadFile(vramTotalPath); errT == nil {
+								uVal, err1 := strconv.ParseUint(strings.TrimSpace(string(uBytes)), 10, 64)
+								tVal, err2 := strconv.ParseUint(strings.TrimSpace(string(tBytes)), 10, 64)
+								if err1 == nil && err2 == nil {
+									metrics.GPUMemUsed = uVal / (1024 * 1024)
+									metrics.GPUMemTotal = tVal / (1024 * 1024)
+								}
+							}
+						}
+
+						// Try GPU temp
+						tempPath := fmt.Sprintf("/sys/class/drm/%s/device/hwmon/hwmon0/temp1_input", card)
+						if _, errTemp := os.Stat(tempPath); errTemp != nil {
+							tempPath = fmt.Sprintf("/sys/class/drm/%s/device/hwmon/hwmon1/temp1_input", card)
+						}
+						if tempBytes, errT := os.ReadFile(tempPath); errT == nil {
+							tMilli, errParse := strconv.ParseFloat(strings.TrimSpace(string(tempBytes)), 64)
+							if errParse == nil {
+								metrics.GPUTemp = tMilli / 1000.0
+							}
+						}
+						return metrics, nil
+					}
+				}
+			}
+		}
+
+		// 3. Try Intel GPU sysfs (Frequency as utilization proxy)
+		for _, card := range []string{"card0", "card1"} {
+			actFreqPath := fmt.Sprintf("/sys/class/drm/%s/gt_act_freq_mhz", card)
+			maxFreqPath := fmt.Sprintf("/sys/class/drm/%s/gt_max_freq_mhz", card)
+			if _, err := os.Stat(actFreqPath); err == nil {
+				actBytes, err1 := os.ReadFile(actFreqPath)
+				maxBytes, err2 := os.ReadFile(maxFreqPath)
+				if err1 == nil && err2 == nil {
+					actVal, errAct := strconv.ParseFloat(strings.TrimSpace(string(actBytes)), 64)
+					maxVal, errMax := strconv.ParseFloat(strings.TrimSpace(string(maxBytes)), 64)
+					if errAct == nil && errMax == nil && maxVal > 0 {
+						metrics.HasGPU = true
+						metrics.GPUUsage = (actVal / maxVal) * 100.0
+						metrics.GPUMemUsage = 0
+						metrics.GPUMemUsed = uint64(actVal)
+						metrics.GPUMemTotal = uint64(maxVal)
+						metrics.GPUTemp = 0
+						return metrics, nil
+					}
+				}
+			}
+		}
+	}
+
+	return metrics, fmt.Errorf("no GPU telemetry found")
+}
+
+func getNvidiaGPUMetrics() (LiveGPUMetrics, error) {
+	metrics := LiveGPUMetrics{}
+	path, err := exec.LookPath("nvidia-smi")
+	if err != nil {
+		return metrics, err
+	}
+
+	cmd := exec.Command(path, "--query-gpu=utilization.gpu,utilization.memory,temperature.gpu,memory.used,memory.total", "--format=csv,noheader,nounits")
+	out, err := cmd.Output()
+	if err != nil {
+		return metrics, err
+	}
+
+	line := strings.TrimSpace(string(out))
+	parts := strings.Split(line, ",")
+	if len(parts) < 5 {
+		return metrics, fmt.Errorf("invalid output format from nvidia-smi")
+	}
+
+	gpuUtil, err1 := strconv.ParseFloat(strings.TrimSpace(parts[0]), 64)
+	memUtil, err2 := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
+	temp, err3 := strconv.ParseFloat(strings.TrimSpace(parts[2]), 64)
+	memUsed, err4 := strconv.ParseUint(strings.TrimSpace(parts[3]), 10, 64)
+	memTotal, err5 := strconv.ParseUint(strings.TrimSpace(parts[4]), 10, 64)
+
+	if err1 == nil && err2 == nil && err3 == nil && err4 == nil && err5 == nil {
+		metrics.HasGPU = true
+		metrics.GPUUsage = gpuUtil
+		metrics.GPUMemUsage = memUtil
+		metrics.GPUMemUsed = memUsed
+		metrics.GPUMemTotal = memTotal
+		metrics.GPUTemp = temp
+		return metrics, nil
+	}
+
+	return metrics, fmt.Errorf("failed to parse GPU metrics")
+}
+
