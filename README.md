@@ -7,6 +7,12 @@
   <a href="https://goreportcard.com/report/github.com/codedbysoumyajit/KernelView-Go">
     <img src="https://goreportcard.com/badge/github.com/codedbysoumyajit/KernelView-Go?style=for-the-badge" alt="Go Report Card" />
   </a>
+  <a href="https://github.com/codedbysoumyajit/KernelView-Go/releases">
+    <img src="https://img.shields.io/github/v/release/codedbysoumyajit/KernelView-Go?style=for-the-badge&label=latest%20release" alt="Latest Release" />
+  </a>
+  <a href="https://github.com/codedbysoumyajit/KernelView-Go/actions/workflows/release.yml">
+    <img src="https://img.shields.io/github/actions/workflow/status/codedbysoumyajit/KernelView-Go/release.yml?branch=main&style=for-the-badge&label=build" alt="Release Build Status" />
+  </a>
 </p>
 
 **KernelView Go** is an aesthetic, blazingly fast system information fetcher and real-time terminal dashboard. It is a complete rewrite of the original Python-based [KernelView](https://github.com/codedbysoumyajit/KernelView), leveraging Go's native compilation, lower memory footprint, and concurrency to deliver near-instant fetches and smooth live system telemetry with minimal CPU overhead.
@@ -59,7 +65,7 @@ To maintain a near-zero CPU footprint, the live loop splits real-time metrics (C
 ```
 ╭────────────────────────────────────────────────────────╮
 │   KernelView Go - System Fetch & Live Dashboard        │
-│   Version: v0.1.0-alpha (Detected: manjaro)            │
+│   Version: v1.0.0 (Detected: manjaro)                  │
 ╰────────────────────────────────────────────────────────╯
 
 USAGE:
@@ -110,7 +116,28 @@ Pure Go system lookups (directly parsing `/proc/meminfo`, dpkg/pacman package co
 
 ## 💻 Installation
 
-### From Source
+### ⚡ One-Command Installers
+
+#### Linux & macOS (sh/bash/zsh)
+```bash
+curl -fsSL https://raw.githubusercontent.com/codedbysoumyajit/KernelView-Go/main/install.sh | sh
+```
+
+#### Windows (PowerShell)
+Run the following inside PowerShell:
+```powershell
+irm https://raw.githubusercontent.com/codedbysoumyajit/KernelView-Go/main/install.ps1 | iex
+```
+
+### 📦 Manual Binary Installation
+
+1. Go to the [Releases](https://github.com/codedbysoumyajit/KernelView-Go/releases) page and download the archive for your system (e.g. `kernelview_1.0.0_linux_amd64.tar.gz` or `kernelview_1.0.0_windows_amd64.zip`).
+2. Extract the archive.
+3. Move the binary into your system `PATH`:
+   * **Linux / macOS**: `sudo mv kernelview /usr/local/bin/`
+   * **Windows**: Add the extracted folder path to your system's `PATH` environment variable.
+
+### 🛠️ From Source
 1. **Prerequisites**: Ensure you have [**Go (1.21 or later)**](https://go.dev/dl/) installed.
 2. **Clone and Build**:
    ```bash

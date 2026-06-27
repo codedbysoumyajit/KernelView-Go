@@ -98,44 +98,55 @@ func getDistroKey() string {
 	if runtime.GOOS == "darwin" {
 		return "macos"
 	}
-	// Read /etc/os-release to identify linux distro
-	if content, err := os.ReadFile("/etc/os-release"); err == nil {
-		contentStr := strings.ToLower(string(content))
-		if strings.Contains(contentStr, "manjaro") {
-			return "manjaro"
-		}
-		if strings.Contains(contentStr, "arch") {
-			return "arch"
-		}
-		if strings.Contains(contentStr, "ubuntu") {
-			return "ubuntu"
-		}
-		if strings.Contains(contentStr, "debian") {
-			return "debian"
-		}
-		if strings.Contains(contentStr, "fedora") {
-			return "fedora"
-		}
-		if strings.Contains(contentStr, "centos") {
-			return "centos"
-		}
-		if strings.Contains(contentStr, "redhat") || strings.Contains(contentStr, "red hat") {
-			return "redhat"
-		}
-		if strings.Contains(contentStr, "alpine") {
-			return "alpine"
-		}
-		if strings.Contains(contentStr, "gentoo") {
-			return "gentoo"
-		}
-		if strings.Contains(contentStr, "suse") || strings.Contains(contentStr, "opensuse") {
-			return "opensuse"
-		}
-		if strings.Contains(contentStr, "mint") {
-			return "mint"
-		}
-		if strings.Contains(contentStr, "android") {
-			return "android"
+	if runtime.GOOS == "android" || os.Getenv("TERMUX_VERSION") != "" {
+		return "android"
+	}
+
+	// Read standard /etc/os-release or Termux prefixed os-release
+	osReleasePaths := []string{"/etc/os-release"}
+	if prefix := os.Getenv("PREFIX"); prefix != "" {
+		osReleasePaths = append(osReleasePaths, prefix+"/etc/os-release")
+	}
+
+	for _, path := range osReleasePaths {
+		if content, err := os.ReadFile(path); err == nil {
+			contentStr := strings.ToLower(string(content))
+			if strings.Contains(contentStr, "manjaro") {
+				return "manjaro"
+			}
+			if strings.Contains(contentStr, "arch") {
+				return "arch"
+			}
+			if strings.Contains(contentStr, "ubuntu") {
+				return "ubuntu"
+			}
+			if strings.Contains(contentStr, "debian") {
+				return "debian"
+			}
+			if strings.Contains(contentStr, "fedora") {
+				return "fedora"
+			}
+			if strings.Contains(contentStr, "centos") {
+				return "centos"
+			}
+			if strings.Contains(contentStr, "redhat") || strings.Contains(contentStr, "red hat") {
+				return "redhat"
+			}
+			if strings.Contains(contentStr, "alpine") {
+				return "alpine"
+			}
+			if strings.Contains(contentStr, "gentoo") {
+				return "gentoo"
+			}
+			if strings.Contains(contentStr, "suse") || strings.Contains(contentStr, "opensuse") {
+				return "opensuse"
+			}
+			if strings.Contains(contentStr, "mint") {
+				return "mint"
+			}
+			if strings.Contains(contentStr, "android") {
+				return "android"
+			}
 		}
 	}
 	return "linux"

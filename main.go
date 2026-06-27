@@ -12,7 +12,7 @@ import (
 )
 
 // version is set at build time
-var version = "v0.1.0-alpha"
+var version = "v1.0.0"
 
 // handleJSONOutput handles all --json flag requests
 func handleJSONOutput(processFlag, networkFlag, fastFlag bool) {
