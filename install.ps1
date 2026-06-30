@@ -41,6 +41,17 @@ if ($exe) {
     }
     Write-Host "Installing to $installDir..."
     Copy-Item -Path $exe.FullName -Destination "$installDir\kernelview.exe" -Force
+
+    # Verify if PATH contains $installDir, and add it if missing
+    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+    $fullPath = $userPath + ";" + $machinePath
+    if ($fullPath -notlike "*$installDir*") {
+        Write-Host "Adding $installDir to User PATH environment variable..."
+        [Environment]::SetEnvironmentVariable("Path", $userPath + ";" + $installDir, "User")
+        $env:PATH += ";$installDir"
+    }
+
     Write-Host "KernelView Go installed successfully! Run 'kernelview' in any shell window."
 } else {
     Write-Error "Could not find kernelview.exe in the downloaded archive."

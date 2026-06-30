@@ -24,6 +24,9 @@ import (
 	"github.com/shirou/gopsutil/v3/process"
 )
 
+// MockDistro is set at runtime to simulate other environments (Exported)
+var MockDistro string
+
 // SystemInfo holds all collected system data. Exported for use in main.
 type SystemInfo struct {
 	OS             string
@@ -468,8 +471,17 @@ func getShell() string {
 	return titleName
 }
 
+func cleanGPUName(name string) string {
+	name = strings.ReplaceAll(name, "Advanced Micro Devices, Inc. [AMD/ATI]", "AMD")
+	name = strings.ReplaceAll(name, "Intel Corporation", "Intel")
+	name = strings.ReplaceAll(name, "NVIDIA Corporation", "Nvidia")
+	name = strings.ReplaceAll(name, "[AMD/ATI]", "AMD")
+	fields := strings.Fields(name)
+	return strings.Join(fields, " ")
+}
+
 func getLinuxGPU() string {
-	cmd := exec.Command("lspci", "-mm")
+	cmd := exec.Command("lspci")
 	out, err := cmd.Output()
 	if err != nil {
 		return ""
@@ -482,32 +494,27 @@ func getLinuxGPU() string {
 			continue
 		}
 		lower := strings.ToLower(line)
-		if strings.Contains(lower, "vga") || strings.Contains(lower, "3d") || strings.Contains(lower, "display") {
-			parts := strings.Split(line, "\"")
-			vendor := ""
-			device := ""
-			if len(parts) > 3 {
-				vendor = parts[3]
-			}
-			if len(parts) > 5 {
-				device = parts[5]
-			}
-			device = strings.TrimPrefix(device, "[")
-			device = strings.TrimSuffix(device, "]")
-			
-			gpuName := ""
-			if vendor != "" && device != "" {
-				gpuName = vendor + " " + device
-			} else if vendor != "" {
-				gpuName = vendor
-			} else if device != "" {
-				gpuName = device
-			}
 
-			if gpuName != "" && !seen[gpuName] {
-				seen[gpuName] = true
-				gpus = append(gpus, gpuName)
-			}
+		var gpuInfo string
+		if idx := strings.Index(lower, "vga compatible controller: "); idx != -1 {
+			gpuInfo = line[idx+len("vga compatible controller: "):]
+		} else if idx := strings.Index(lower, "3d controller: "); idx != -1 {
+			gpuInfo = line[idx+len("3d controller: "):]
+		} else if idx := strings.Index(lower, "display controller: "); idx != -1 {
+			gpuInfo = line[idx+len("display controller: "):]
+		} else {
+			continue
+		}
+
+		gpuInfo = strings.TrimSpace(gpuInfo)
+		if revIdx := strings.LastIndex(gpuInfo, " (rev "); revIdx != -1 {
+			gpuInfo = strings.TrimSpace(gpuInfo[:revIdx])
+		}
+
+		gpuInfo = cleanGPUName(gpuInfo)
+		if gpuInfo != "" && !seen[gpuInfo] {
+			seen[gpuInfo] = true
+			gpus = append(gpus, gpuInfo)
 		}
 	}
 	if len(gpus) > 0 {
@@ -692,17 +699,137 @@ func getResolution() string {
 	return "Unknown"
 }
 
+func getLinuxTerminal() string {
+	ppid := os.Getppid()
+	// Traverse up to 5 levels to find the terminal emulator
+	for i := 0; i < 5; i++ {
+		if ppid <= 1 {
+			break
+		}
+
+		statPath := fmt.Sprintf("/proc/%d/stat", ppid)
+		data, err := os.ReadFile(statPath)
+		if err != nil {
+			break
+		}
+
+		statStr := string(data)
+		lastParen := strings.LastIndex(statStr, ")")
+		if lastParen == -1 || lastParen+2 >= len(statStr) {
+			break
+		}
+
+		firstParen := strings.Index(statStr, "(")
+		var procName string
+		if firstParen != -1 && firstParen < lastParen {
+			procName = statStr[firstParen+1 : lastParen]
+		}
+
+		fields := strings.Fields(statStr[lastParen+2:])
+		if len(fields) < 2 {
+			break
+		}
+
+		parentPidStr := fields[1]
+		parentPid := 0
+		fmt.Sscanf(parentPidStr, "%d", &parentPid)
+
+		lowerName := strings.ToLower(procName)
+		switch lowerName {
+		case "gnome-terminal-", "gnome-terminal":
+			return "GNOME Terminal"
+		case "konsole":
+			return "Konsole"
+		case "xfce4-terminal":
+			return "XFCE Terminal"
+		case "alacritty":
+			return "Alacritty"
+		case "kitty":
+			return "Kitty"
+		case "foot":
+			return "Foot"
+		case "urxvt", "rxvt-unicode", "urxvt-bin":
+			return "urxvt"
+		case "xterm":
+			return "XTerm"
+		case "st":
+			return "st"
+		case "wezterm-gui", "wezterm":
+			return "WezTerm"
+		case "tilix":
+			return "Tilix"
+		case "terminator":
+			return "Terminator"
+		case "guake":
+			return "Guake"
+		case "tilda":
+			return "Tilda"
+		case "yakuake":
+			return "Yakuake"
+		case "lxterminal":
+			return "LXTerminal"
+		case "cool-retro-ter":
+			return "Cool Retro Term"
+		case "tmux: client", "tmux", "screen":
+			// Multiplexers, keep going up to find the terminal emulator
+		case "bash", "zsh", "sh", "fish", "dash", "tcsh", "csh", "ksh":
+			// Shells, keep going up
+		case "sudo", "su":
+			// Privilege escalations, keep going up
+		default:
+			if strings.HasSuffix(lowerName, "terminal") || strings.HasSuffix(lowerName, "term") || strings.Contains(lowerName, "terminal-server") {
+				cleanName := strings.TrimSuffix(lowerName, "-server")
+				cleanName = strings.TrimSuffix(cleanName, "-gui")
+				return strings.Title(cleanName)
+			}
+		}
+
+		ppid = parentPid
+	}
+	return ""
+}
+
 func getTerminal() string {
+	// 1. Check TERM_PROGRAM (common on macOS, VS Code, Warp, etc.)
 	termProg := os.Getenv("TERM_PROGRAM")
 	if termProg != "" {
 		termProg = strings.TrimSuffix(termProg, ".app")
 		termProg = strings.Replace(termProg, "iTerm", "iTerm2", 1)
 		return strings.Title(termProg)
 	}
+
+	// 2. Check TERMUX_VERSION (Termux on Android)
+	if os.Getenv("TERMUX_VERSION") != "" {
+		return "Termux"
+	}
+
+	// 3. Check specific env variables set by terminal emulators
+	if os.Getenv("ALACRITTY_LOG") != "" || os.Getenv("ALACRITTY_SOCKET") != "" {
+		return "Alacritty"
+	}
+	if os.Getenv("KITTY_WINDOW_ID") != "" || os.Getenv("KITTY_PID") != "" {
+		return "Kitty"
+	}
+	if os.Getenv("WT_SESSION") != "" || os.Getenv("WT_PROFILE_ID") != "" {
+		return "Windows Terminal"
+	}
+	if os.Getenv("KONSOLE_VERSION") != "" || os.Getenv("KONSOLE_PROFILE_NAME") != "" {
+		return "Konsole"
+	}
+
+	// 4. Linux specific parent process resolution
+	if runtime.GOOS == "linux" {
+		if term := getLinuxTerminal(); term != "" {
+			return term
+		}
+	}
+
+	// 5. Fallback to TERM if it's not a generic name
 	term := os.Getenv("TERM")
-	if term != "" && term != "xterm-256color" && term != "screen" {
+	if term != "" && term != "xterm-256color" && term != "screen" && term != "linux" && term != "xterm" {
 		return term
 	}
+
 	return "Unknown"
 }
 
@@ -1121,6 +1248,10 @@ func getIOCounters() string {
 
 // GetSystemInfo is the main exported function to collect system data.
 func GetSystemInfo(isFast bool) *SystemInfo {
+	if MockDistro != "" {
+		return GetMockSystemInfo(MockDistro)
+	}
+
 	info := &SystemInfo{}
 	var wg sync.WaitGroup
 
@@ -1199,6 +1330,10 @@ func GetSystemInfo(isFast bool) *SystemInfo {
 
 // GetProcessList fetches information about running processes. (Exported)
 func GetProcessList() ([]ProcessInfo, error) {
+	if MockDistro != "" {
+		return GetMockProcessList(), nil
+	}
+
 	allProcs, err := process.Processes()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get processes: %w", err)
@@ -1286,6 +1421,10 @@ func GetProcessList() ([]ProcessInfo, error) {
 
 // GetNetworkDetails fetches all network-related info (Exported)
 func GetNetworkDetails() (*NetworkInfo, error) {
+	if MockDistro != "" {
+		return GetMockNetworkDetails(), nil
+	}
+
 	info := &NetworkInfo{}
 	var wg sync.WaitGroup
 	var errPublicIP error
@@ -1356,16 +1495,16 @@ type LiveMetrics struct {
 
 // LiveTracker tracks metrics across real-time updates (Exported)
 type LiveTracker struct {
-	procsMap          map[int32]*process.Process
-	prevNetRx         uint64
-	prevNetTx         uint64
-	prevNetTime       time.Time
-	mu                sync.Mutex
-	bootTime          time.Time
+	procsMap    map[int32]*process.Process
+	prevNetRx   uint64
+	prevNetTx   uint64
+	prevNetTime time.Time
+	mu          sync.Mutex
+	bootTime    time.Time
 
 	// Cached processes list
-	cachedProcesses   []ProcessInfo
-	lastProcUpdate    time.Time
+	cachedProcesses []ProcessInfo
+	lastProcUpdate  time.Time
 
 	// Cached disk usage
 	cachedDiskUsed    uint64
@@ -1374,16 +1513,16 @@ type LiveTracker struct {
 	lastDiskUpdate    time.Time
 
 	// Cached temperature
-	cachedTemp        float64
-	lastTempUpdate    time.Time
+	cachedTemp     float64
+	lastTempUpdate time.Time
 
 	// Cached net interface name
-	cachedNetIface    string
-	lastIfaceUpdate   time.Time
+	cachedNetIface  string
+	lastIfaceUpdate time.Time
 
 	// Cached GPU metrics
-	cachedGPUMetrics  LiveGPUMetrics
-	lastGPUUpdate     time.Time
+	cachedGPUMetrics LiveGPUMetrics
+	lastGPUUpdate    time.Time
 }
 
 // NewLiveTracker creates a new tracker instance (Exported)
@@ -1401,6 +1540,10 @@ func NewLiveTracker() *LiveTracker {
 
 // GetMetrics returns the calculated live metrics (Exported)
 func (lt *LiveTracker) GetMetrics() (*LiveMetrics, error) {
+	if MockDistro != "" {
+		return GetMockLiveMetrics(MockDistro), nil
+	}
+
 	lt.mu.Lock()
 	defer lt.mu.Unlock()
 
@@ -1449,6 +1592,7 @@ func (lt *LiveTracker) GetMetrics() (*LiveMetrics, error) {
 	if runtime.GOOS == "linux" {
 		file, err := os.Open("/proc/meminfo")
 		if err == nil {
+			defer file.Close()
 			memMap := make(map[string]uint64)
 			scanner := bufio.NewScanner(file)
 			for scanner.Scan() {
@@ -1464,7 +1608,6 @@ func (lt *LiveTracker) GetMetrics() (*LiveMetrics, error) {
 					}
 				}
 			}
-			file.Close()
 
 			total := memMap["MemTotal"]
 			if total > 0 {
@@ -1705,89 +1848,143 @@ type LiveGPUMetrics struct {
 	HasGPU      bool
 	GPUUsage    float64
 	GPUMemUsage float64
-	GPUMemUsed  uint64 // MB or MHz (Intel)
-	GPUMemTotal uint64 // MB or MHz (Intel)
+	GPUMemUsed  uint64  // MB or MHz (Intel)
+	GPUMemTotal uint64  // MB or MHz (Intel)
 	GPUTemp     float64 // °C
+}
+
+func getAMDOrIntelTemp(cardName string) float64 {
+	hwmonDir := fmt.Sprintf("/sys/class/drm/%s/device/hwmon", cardName)
+	files, err := os.ReadDir(hwmonDir)
+	if err == nil {
+		for _, f := range files {
+			if strings.HasPrefix(f.Name(), "hwmon") {
+				tempPath := fmt.Sprintf("%s/%s/temp1_input", hwmonDir, f.Name())
+				if bytes, err := os.ReadFile(tempPath); err == nil {
+					if mVal, err := strconv.ParseFloat(strings.TrimSpace(string(bytes)), 64); err == nil {
+						return mVal / 1000.0
+					}
+				}
+			}
+		}
+	}
+	return 0
 }
 
 func getGPUMetrics() (LiveGPUMetrics, error) {
 	metrics := LiveGPUMetrics{}
 
-	// 1. Try Nvidia-smi first
+	// 1. Try Nvidia-smi first (Proprietary Nvidia driver)
 	if nvidia, err := getNvidiaGPUMetrics(); err == nil && nvidia.HasGPU {
 		return nvidia, nil
 	}
 
 	if runtime.GOOS == "linux" {
-		// 2. Try AMD GPU sysfs
-		for _, card := range []string{"card0", "card1"} {
-			busyPath := fmt.Sprintf("/sys/class/drm/%s/device/gpu_busy_percent", card)
-			if _, err := os.Stat(busyPath); err == nil {
-				busyBytes, err := os.ReadFile(busyPath)
-				if err == nil {
-					busyVal, err := strconv.ParseFloat(strings.TrimSpace(string(busyBytes)), 64)
-					if err == nil {
-						metrics.HasGPU = true
-						metrics.GPUUsage = busyVal
+		// Scan all active DRM cards
+		files, err := os.ReadDir("/sys/class/drm")
+		if err == nil {
+			for _, file := range files {
+				cardName := file.Name()
+				if !strings.HasPrefix(cardName, "card") || strings.Contains(cardName, "-") {
+					continue
+				}
 
-						// Try VRAM utilization
-						memBusyPath := fmt.Sprintf("/sys/class/drm/%s/device/mem_busy_percent", card)
-						if memBytes, err := os.ReadFile(memBusyPath); err == nil {
-							if memVal, err := strconv.ParseFloat(strings.TrimSpace(string(memBytes)), 64); err == nil {
-								metrics.GPUMemUsage = memVal
+				devicePath := fmt.Sprintf("/sys/class/drm/%s/device", cardName)
+				if _, err := os.Stat(devicePath); err != nil {
+					continue
+				}
+
+				// Read Vendor ID
+				vendorBytes, err := os.ReadFile(fmt.Sprintf("/sys/class/drm/%s/device/vendor", cardName))
+				if err != nil {
+					continue
+				}
+				vendorID := strings.TrimSpace(strings.ToLower(string(vendorBytes)))
+
+				// 2. AMD GPU (Vendor ID: 0x1002)
+				if strings.Contains(vendorID, "1002") {
+					metrics.HasGPU = true
+
+					// Try reading GPU busy/usage
+					busyPath := fmt.Sprintf("/sys/class/drm/%s/device/gpu_busy_percent", cardName)
+					if busyBytes, err := os.ReadFile(busyPath); err == nil {
+						if busyVal, err := strconv.ParseFloat(strings.TrimSpace(string(busyBytes)), 64); err == nil {
+							metrics.GPUUsage = busyVal
+						}
+					}
+
+					// Try reading VRAM stats
+					vramUsedPath := fmt.Sprintf("/sys/class/drm/%s/device/mem_info_vram_used", cardName)
+					vramTotalPath := fmt.Sprintf("/sys/class/drm/%s/device/mem_info_vram_total", cardName)
+					if uBytes, errU := os.ReadFile(vramUsedPath); errU == nil {
+						if tBytes, errT := os.ReadFile(vramTotalPath); errT == nil {
+							uVal, err1 := strconv.ParseUint(strings.TrimSpace(string(uBytes)), 10, 64)
+							tVal, err2 := strconv.ParseUint(strings.TrimSpace(string(tBytes)), 10, 64)
+							if err1 == nil && err2 == nil && tVal > 0 {
+								metrics.GPUMemUsed = uVal / (1024 * 1024)
+								metrics.GPUMemTotal = tVal / (1024 * 1024)
+								metrics.GPUMemUsage = (float64(uVal) / float64(tVal)) * 100.0
 							}
 						}
+					}
 
-						// Try VRAM Used / Total
-						vramUsedPath := fmt.Sprintf("/sys/class/drm/%s/device/mem_info_vram_used", card)
-						vramTotalPath := fmt.Sprintf("/sys/class/drm/%s/device/mem_info_vram_total", card)
-						if uBytes, errU := os.ReadFile(vramUsedPath); errU == nil {
-							if tBytes, errT := os.ReadFile(vramTotalPath); errT == nil {
-								uVal, err1 := strconv.ParseUint(strings.TrimSpace(string(uBytes)), 10, 64)
-								tVal, err2 := strconv.ParseUint(strings.TrimSpace(string(tBytes)), 10, 64)
-								if err1 == nil && err2 == nil {
-									metrics.GPUMemUsed = uVal / (1024 * 1024)
-									metrics.GPUMemTotal = tVal / (1024 * 1024)
-								}
+					// Try reading temperature from hwmon
+					metrics.GPUTemp = getAMDOrIntelTemp(cardName)
+					return metrics, nil
+				}
+
+				// 3. Intel GPU (Vendor ID: 0x8086)
+				if strings.Contains(vendorID, "8086") {
+					actFreqPath := fmt.Sprintf("/sys/class/drm/%s/gt_act_freq_mhz", cardName)
+					maxFreqPath := fmt.Sprintf("/sys/class/drm/%s/gt_max_freq_mhz", cardName)
+					if _, err := os.Stat(actFreqPath); err == nil {
+						actBytes, err1 := os.ReadFile(actFreqPath)
+						maxBytes, err2 := os.ReadFile(maxFreqPath)
+						if err1 == nil && err2 == nil {
+							actVal, errAct := strconv.ParseFloat(strings.TrimSpace(string(actBytes)), 64)
+							maxVal, errMax := strconv.ParseFloat(strings.TrimSpace(string(maxBytes)), 64)
+							if errAct == nil && errMax == nil && maxVal > 0 {
+								metrics.HasGPU = true
+								metrics.GPUUsage = (actVal / maxVal) * 100.0
+								metrics.GPUMemUsage = 0
+								metrics.GPUMemUsed = uint64(actVal)
+								metrics.GPUMemTotal = uint64(maxVal)
+								metrics.GPUTemp = getAMDOrIntelTemp(cardName)
+								return metrics, nil
 							}
 						}
-
-						// Try GPU temp
-						tempPath := fmt.Sprintf("/sys/class/drm/%s/device/hwmon/hwmon0/temp1_input", card)
-						if _, errTemp := os.Stat(tempPath); errTemp != nil {
-							tempPath = fmt.Sprintf("/sys/class/drm/%s/device/hwmon/hwmon1/temp1_input", card)
-						}
-						if tempBytes, errT := os.ReadFile(tempPath); errT == nil {
-							tMilli, errParse := strconv.ParseFloat(strings.TrimSpace(string(tempBytes)), 64)
-							if errParse == nil {
-								metrics.GPUTemp = tMilli / 1000.0
-							}
-						}
-						return metrics, nil
 					}
 				}
-			}
-		}
 
-		// 3. Try Intel GPU sysfs (Frequency as utilization proxy)
-		for _, card := range []string{"card0", "card1"} {
-			actFreqPath := fmt.Sprintf("/sys/class/drm/%s/gt_act_freq_mhz", card)
-			maxFreqPath := fmt.Sprintf("/sys/class/drm/%s/gt_max_freq_mhz", card)
-			if _, err := os.Stat(actFreqPath); err == nil {
-				actBytes, err1 := os.ReadFile(actFreqPath)
-				maxBytes, err2 := os.ReadFile(maxFreqPath)
-				if err1 == nil && err2 == nil {
-					actVal, errAct := strconv.ParseFloat(strings.TrimSpace(string(actBytes)), 64)
-					maxVal, errMax := strconv.ParseFloat(strings.TrimSpace(string(maxBytes)), 64)
-					if errAct == nil && errMax == nil && maxVal > 0 {
-						metrics.HasGPU = true
-						metrics.GPUUsage = (actVal / maxVal) * 100.0
-						metrics.GPUMemUsage = 0
-						metrics.GPUMemUsed = uint64(actVal)
-						metrics.GPUMemTotal = uint64(maxVal)
-						metrics.GPUTemp = 0
-						return metrics, nil
+				// 4. Nvidia GPU (Vendor ID: 0x10de) (Nouveau/open-source fallback when nvidia-smi is missing)
+				if strings.Contains(vendorID, "10de") {
+					metrics.HasGPU = true
+
+					// Try reading GPU busy/usage
+					busyPath := fmt.Sprintf("/sys/class/drm/%s/device/gpu_busy_percent", cardName)
+					if busyBytes, err := os.ReadFile(busyPath); err == nil {
+						if busyVal, err := strconv.ParseFloat(strings.TrimSpace(string(busyBytes)), 64); err == nil {
+							metrics.GPUUsage = busyVal
+						}
 					}
+
+					// Try reading VRAM stats
+					vramUsedPath := fmt.Sprintf("/sys/class/drm/%s/device/mem_info_vram_used", cardName)
+					vramTotalPath := fmt.Sprintf("/sys/class/drm/%s/device/mem_info_vram_total", cardName)
+					if uBytes, errU := os.ReadFile(vramUsedPath); errU == nil {
+						if tBytes, errT := os.ReadFile(vramTotalPath); errT == nil {
+							uVal, err1 := strconv.ParseUint(strings.TrimSpace(string(uBytes)), 10, 64)
+							tVal, err2 := strconv.ParseUint(strings.TrimSpace(string(tBytes)), 10, 64)
+							if err1 == nil && err2 == nil && tVal > 0 {
+								metrics.GPUMemUsed = uVal / (1024 * 1024)
+								metrics.GPUMemTotal = tVal / (1024 * 1024)
+								metrics.GPUMemUsage = (float64(uVal) / float64(tVal)) * 100.0
+							}
+						}
+					}
+
+					metrics.GPUTemp = getAMDOrIntelTemp(cardName)
+					return metrics, nil
 				}
 			}
 		}
@@ -1834,3 +2031,540 @@ func getNvidiaGPUMetrics() (LiveGPUMetrics, error) {
 	return metrics, fmt.Errorf("failed to parse GPU metrics")
 }
 
+// GPUDetails holds comprehensive details about the graphics hardware and libraries
+type GPUDetails struct {
+	Name        string
+	Vendor      string
+	Driver      string
+	VRAMUsed    string
+	VRAMTotal   string
+	VRAMFree    string
+	Temperature string
+	OpenGL      string
+	Vulkan      string
+	OpenCL      string
+	CUDA        string
+}
+
+// GetGPUDetails collects detailed GPU and graphics API information
+func GetGPUDetails() *GPUDetails {
+	if MockDistro != "" {
+		return GetMockGPUDetails(MockDistro)
+	}
+
+	details := &GPUDetails{
+		Name:        "Unknown GPU",
+		Vendor:      "Unknown",
+		Driver:      "Unknown",
+		VRAMUsed:    "Unknown",
+		VRAMTotal:   "Unknown",
+		VRAMFree:    "Unknown",
+		Temperature: "Unknown",
+		OpenGL:      "Unknown",
+		Vulkan:      "Unknown",
+		OpenCL:      "Unknown",
+		CUDA:        "Unknown",
+	}
+
+	// 1. Resolve name
+	if name := getLinuxGPU(); name != "" {
+		details.Name = name
+	} else if name := getGPUInfo(); name != "" && name != "Unknown" {
+		details.Name = name
+	}
+
+	// 2. Resolve Graphics Libraries
+	details.OpenGL = getOpenGLVersion()
+	details.Vulkan = getVulkanVersion()
+	details.OpenCL = getOpenCLVersion()
+	details.CUDA = getCUDAVersion()
+
+	// 3. Resolve Vendor, Driver, VRAM, and Temp based on OS
+	if runtime.GOOS == "linux" {
+		// Scan active DRM cards
+		files, err := os.ReadDir("/sys/class/drm")
+		if err == nil {
+			for _, file := range files {
+				cardName := file.Name()
+				if !strings.HasPrefix(cardName, "card") || strings.Contains(cardName, "-") {
+					continue
+				}
+				devicePath := fmt.Sprintf("/sys/class/drm/%s/device", cardName)
+				if _, err := os.Stat(devicePath); err != nil {
+					continue
+				}
+
+				// Resolve Driver
+				driverLink := fmt.Sprintf("/sys/class/drm/%s/device/driver", cardName)
+				if target, err := os.Readlink(driverLink); err == nil {
+					parts := strings.Split(target, "/")
+					details.Driver = parts[len(parts)-1]
+				}
+
+				// Resolve Vendor
+				vendorBytes, err := os.ReadFile(fmt.Sprintf("/sys/class/drm/%s/device/vendor", cardName))
+				if err == nil {
+					vendorID := strings.TrimSpace(strings.ToLower(string(vendorBytes)))
+					if strings.Contains(vendorID, "1002") {
+						details.Vendor = "AMD"
+					} else if strings.Contains(vendorID, "8086") {
+						details.Vendor = "Intel"
+					} else if strings.Contains(vendorID, "10de") {
+						details.Vendor = "Nvidia"
+					}
+				}
+
+				// Resolve VRAM
+				vramUsedPath := fmt.Sprintf("/sys/class/drm/%s/device/mem_info_vram_used", cardName)
+				vramTotalPath := fmt.Sprintf("/sys/class/drm/%s/device/mem_info_vram_total", cardName)
+				if uBytes, errU := os.ReadFile(vramUsedPath); errU == nil {
+					if tBytes, errT := os.ReadFile(vramTotalPath); errT == nil {
+						uVal, err1 := strconv.ParseUint(strings.TrimSpace(string(uBytes)), 10, 64)
+						tVal, err2 := strconv.ParseUint(strings.TrimSpace(string(tBytes)), 10, 64)
+						if err1 == nil && err2 == nil && tVal > 0 {
+							details.VRAMUsed = FormatBytes(uVal)
+							details.VRAMTotal = FormatBytes(tVal)
+							if tVal >= uVal {
+								details.VRAMFree = FormatBytes(tVal - uVal)
+							}
+						}
+					}
+				}
+
+				// Resolve Temp
+				if temp := getAMDOrIntelTemp(cardName); temp > 0 {
+					details.Temperature = fmt.Sprintf("%.1f °C", temp)
+				}
+				break // Stop after finding the first active card
+			}
+		}
+
+		// Fallback/Override if nvidia-smi is available
+		if nvidia, err := getNvidiaGPUMetrics(); err == nil && nvidia.HasGPU {
+			details.Vendor = "Nvidia"
+			details.VRAMUsed = fmt.Sprintf("%d MB", nvidia.GPUMemUsed)
+			details.VRAMTotal = fmt.Sprintf("%d MB", nvidia.GPUMemTotal)
+			if nvidia.GPUMemTotal >= nvidia.GPUMemUsed {
+				details.VRAMFree = fmt.Sprintf("%d MB", nvidia.GPUMemTotal-nvidia.GPUMemUsed)
+			}
+			details.Temperature = fmt.Sprintf("%.1f °C", nvidia.GPUTemp)
+			// Read driver from nvidia-smi
+			cmd := exec.Command("nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader")
+			if out, err := cmd.Output(); err == nil {
+				details.Driver = "Nvidia proprietary (" + strings.TrimSpace(string(out)) + ")"
+			}
+		}
+	} else if runtime.GOOS == "windows" {
+		// Try using wmic
+		cmd := exec.Command("wmic", "path", "win32_VideoController", "get", "AdapterRAM,DriverVersion,VideoProcessor")
+		if out, err := cmd.Output(); err == nil {
+			lines := strings.Split(string(out), "\n")
+			if len(lines) > 1 {
+				fields := strings.Fields(lines[1])
+				if len(fields) >= 3 {
+					details.Driver = fields[1]
+					if ramBytes, err := strconv.ParseUint(fields[0], 10, 64); err == nil && ramBytes > 0 {
+						details.VRAMTotal = FormatBytes(ramBytes)
+					}
+				}
+			}
+		}
+		lowerName := strings.ToLower(details.Name)
+		if strings.Contains(lowerName, "nvidia") {
+			details.Vendor = "Nvidia"
+			if nvidia, err := getNvidiaGPUMetrics(); err == nil && nvidia.HasGPU {
+				details.VRAMUsed = fmt.Sprintf("%d MB", nvidia.GPUMemUsed)
+				details.VRAMTotal = fmt.Sprintf("%d MB", nvidia.GPUMemTotal)
+				if nvidia.GPUMemTotal >= nvidia.GPUMemUsed {
+					details.VRAMFree = fmt.Sprintf("%d MB", nvidia.GPUMemTotal-nvidia.GPUMemUsed)
+				}
+				details.Temperature = fmt.Sprintf("%.1f °C", nvidia.GPUTemp)
+			}
+		} else if strings.Contains(lowerName, "amd") || strings.Contains(lowerName, "radeon") {
+			details.Vendor = "AMD"
+		} else if strings.Contains(lowerName, "intel") {
+			details.Vendor = "Intel"
+		}
+	} else if runtime.GOOS == "darwin" {
+		// macOS
+		cmd := exec.Command("system_profiler", "SPDisplaysDataType")
+		if out, err := cmd.Output(); err == nil {
+			lines := strings.Split(string(out), "\n")
+			for _, line := range lines {
+				lineLower := strings.ToLower(line)
+				if strings.Contains(lineLower, "vendor:") {
+					details.Vendor = strings.TrimSpace(strings.SplitN(line, ":", 2)[1])
+				} else if strings.Contains(lineLower, "vram (total):") {
+					details.VRAMTotal = strings.TrimSpace(strings.SplitN(line, ":", 2)[1])
+				} else if strings.Contains(lineLower, "metal:") {
+					details.Vulkan = "Metal (" + strings.TrimSpace(strings.SplitN(line, ":", 2)[1]) + ")"
+				}
+			}
+		}
+	}
+
+	return details
+}
+
+func getOpenGLVersion() string {
+	cmd := exec.Command("glxinfo")
+	out, err := cmd.Output()
+	if err == nil {
+		lines := strings.Split(string(out), "\n")
+		for _, line := range lines {
+			if strings.Contains(line, "OpenGL version string:") {
+				return strings.TrimSpace(strings.TrimPrefix(line, "OpenGL version string:"))
+			}
+		}
+	}
+	cmd = exec.Command("eglinfo")
+	out, err = cmd.Output()
+	if err == nil {
+		lines := strings.Split(string(out), "\n")
+		for _, line := range lines {
+			if strings.Contains(line, "EGL version string:") {
+				return strings.TrimSpace(strings.TrimPrefix(line, "EGL version string:"))
+			}
+		}
+	}
+	return "Unknown"
+}
+
+func getVulkanVersion() string {
+	cmd := exec.Command("vulkaninfo", "--summary")
+	out, err := cmd.Output()
+	if err == nil {
+		lines := strings.Split(string(out), "\n")
+		for _, line := range lines {
+			if strings.Contains(line, "Vulkan Instance Version:") {
+				return strings.TrimSpace(strings.TrimPrefix(line, "Vulkan Instance Version:"))
+			}
+		}
+	}
+	cmd = exec.Command("vulkaninfo")
+	out, err = cmd.Output()
+	if err == nil {
+		lines := strings.Split(string(out), "\n")
+		for _, line := range lines {
+			if strings.Contains(line, "Vulkan Instance Version") {
+				parts := strings.Split(line, ":")
+				if len(parts) > 1 {
+					return strings.TrimSpace(parts[1])
+				}
+			}
+		}
+	}
+	return "Unknown"
+}
+
+func getOpenCLVersion() string {
+	cmd := exec.Command("clinfo")
+	out, err := cmd.Output()
+	if err == nil {
+		lines := strings.Split(string(out), "\n")
+		for _, line := range lines {
+			if strings.Contains(line, "Platform Version") {
+				parts := strings.Split(line, ":")
+				if len(parts) > 1 {
+					return strings.TrimSpace(parts[1])
+				}
+			}
+		}
+	}
+	return "Unknown"
+}
+
+func getCUDAVersion() string {
+	cmd := exec.Command("nvcc", "--version")
+	out, err := cmd.Output()
+	if err == nil {
+		lines := strings.Split(string(out), "\n")
+		for _, line := range lines {
+			if strings.Contains(line, "release") {
+				idx := strings.Index(line, "release")
+				return strings.TrimSpace(line[idx:])
+			}
+		}
+	}
+	cmd = exec.Command("nvidia-smi")
+	out, err = cmd.Output()
+	if err == nil {
+		lines := strings.Split(string(out), "\n")
+		for _, line := range lines {
+			if strings.Contains(line, "CUDA Version:") {
+				idx := strings.Index(line, "CUDA Version:")
+				part := line[idx:]
+				part = strings.TrimSuffix(part, "|")
+				return strings.TrimSpace(strings.TrimPrefix(part, "CUDA Version:"))
+			}
+		}
+	}
+	return "Unknown"
+}
+
+// GetMockSystemInfo returns mock system specifications
+func GetMockSystemInfo(distro string) *SystemInfo {
+	info := &SystemInfo{
+		Hostname:      "mock-pc",
+		Uptime:        "2 hours, 15 mins",
+		Shell:         "zsh 5.9",
+		Resolution:    "1920x1080",
+		DE:            "GNOME",
+		WindowManager: "Mutter",
+		Terminal:      "Alacritty",
+		Locale:        "en_US.UTF-8",
+		Languages:     "Go, Rust, TypeScript",
+		OpenPorts:     "22, 80, 443, 3000",
+		Temperature:   "45.0 °C",
+		Go:            "go1.21.0",
+		Packages:      "Pacman (1200)",
+	}
+
+	switch distro {
+	case "arch":
+		info.OS = "Arch Linux x86_64"
+		info.Kernel = "Linux 6.10.1-arch1-1"
+		info.CPU = "AMD Ryzen 7 7800X3D @ 4.20 GHz"
+		info.CoresThreads = "8/16"
+		info.CPUSpeed = "4.20 GHz"
+		info.GPU = "Nvidia GeForce RTX 4090"
+		info.RAM = "8.5GB / 32.0GB (26%)"
+		info.Swap = "2.0GB / 8.0GB (25%)"
+		info.Disk = "150GB / 1000GB (15%)"
+		info.IPAddress = "192.168.1.100"
+	case "ubuntu":
+		info.OS = "Ubuntu 24.04 LTS"
+		info.Kernel = "Linux 6.8.0-31-generic"
+		info.CPU = "Intel(R) Core(TM) i7-1370P @ 2.20 GHz"
+		info.CoresThreads = "14/20"
+		info.CPUSpeed = "5.20 GHz"
+		info.GPU = "Intel Iris Xe Graphics"
+		info.RAM = "4.1GB / 16.0GB (25%)"
+		info.Swap = "1.0GB / 4.0GB (25%)"
+		info.Disk = "64GB / 512GB (12%)"
+		info.IPAddress = "192.168.1.105"
+		info.Packages = "Dpkg (1850), Snap (12)"
+		info.Shell = "bash 5.2"
+		info.Terminal = "GNOME Terminal"
+	case "macos":
+		info.OS = "macOS Sonoma 14.5"
+		info.Kernel = "Darwin 23.5.0"
+		info.CPU = "Apple M3 Max"
+		info.CoresThreads = "16/16"
+		info.CPUSpeed = "3.40 GHz"
+		info.GPU = "Apple M3 Max 30-Core GPU"
+		info.RAM = "12.3GB / 48.0GB (25%)"
+		info.Swap = "0.0GB / 0.0GB (0%)"
+		info.Disk = "256GB / 1000GB (25%)"
+		info.IPAddress = "10.0.0.15"
+		info.Packages = "Homebrew (120)"
+		info.Terminal = "Terminal.app"
+		info.DE = "Aqua"
+		info.WindowManager = "Quartz Compositor"
+	case "windows":
+		info.OS = "Microsoft Windows 11 Pro"
+		info.Kernel = "NT 10.0.22631"
+		info.CPU = "Intel(R) Core(TM) i9-14900HX @ 2.20 GHz"
+		info.CoresThreads = "24/32"
+		info.CPUSpeed = "5.80 GHz"
+		info.GPU = "Nvidia GeForce RTX 4080 Laptop GPU"
+		info.RAM = "14.2GB / 64.0GB (22%)"
+		info.Swap = "4.0GB / 16.0GB (25%)"
+		info.Disk = "450GB / 2000GB (22%)"
+		info.IPAddress = "192.168.1.20"
+		info.Packages = "Winget (45)"
+		info.Shell = "PowerShell 7.4.2"
+		info.Terminal = "Windows Terminal"
+		info.DE = "Explorer"
+		info.WindowManager = "DWM"
+	default:
+		info.OS = "Generic Linux"
+		info.Kernel = "Linux 6.1.0"
+		info.CPU = "Generic Processor"
+		info.CoresThreads = "4/8"
+		info.CPUSpeed = "3.00 GHz"
+		info.GPU = "Generic Graphics"
+		info.RAM = "2.0GB / 8.0GB (25%)"
+		info.Swap = "0.0GB / 0.0GB (0%)"
+		info.Disk = "20GB / 100GB (20%)"
+		info.IPAddress = "127.0.0.1"
+	}
+	return info
+}
+
+// GetMockGPUDetails returns mock GPU and API specifications
+func GetMockGPUDetails(distro string) *GPUDetails {
+	details := &GPUDetails{
+		Name:        "Generic GPU",
+		Vendor:      "Generic",
+		Driver:      "generic-driver",
+		VRAMUsed:    "512 MB",
+		VRAMTotal:   "2.0 GB",
+		VRAMFree:    "1.5 GB",
+		Temperature: "40.0 °C",
+		OpenGL:      "OpenGL 4.5",
+		Vulkan:      "Vulkan 1.2",
+		OpenCL:      "OpenCL 2.0",
+		CUDA:        "Unknown",
+	}
+
+	switch distro {
+	case "arch":
+		details.Name = "Nvidia GeForce RTX 4090"
+		details.Vendor = "Nvidia"
+		details.Driver = "Nvidia proprietary (555.58)"
+		details.VRAMUsed = "6.1 GB"
+		details.VRAMTotal = "24.0 GB"
+		details.VRAMFree = "17.9 GB"
+		details.Temperature = "52.0 °C"
+		details.OpenGL = "OpenGL 4.6 (Compatibility Profile) NVIDIA 555.58"
+		details.Vulkan = "Vulkan 1.3.277"
+		details.OpenCL = "OpenCL 3.0 CUDA"
+		details.CUDA = "release 12.5, V12.5.82"
+	case "ubuntu":
+		details.Name = "Intel Iris Xe Graphics"
+		details.Vendor = "Intel"
+		details.Driver = "i915"
+		details.VRAMUsed = "1.2 GB"
+		details.VRAMTotal = "8.0 GB"
+		details.VRAMFree = "6.8 GB"
+		details.Temperature = "46.0 °C"
+		details.OpenGL = "OpenGL 4.6 Mesa 24.0.5"
+		details.Vulkan = "Vulkan 1.3.274"
+		details.OpenCL = "OpenCL 3.0 Neo"
+	case "macos":
+		details.Name = "Apple M3 Max GPU"
+		details.Vendor = "Apple"
+		details.Driver = "Apple Metal Driver"
+		details.VRAMTotal = "48.0 GB"
+		details.Vulkan = "Metal (310.25)"
+	case "windows":
+		details.Name = "Nvidia GeForce RTX 4080 Laptop GPU"
+		details.Vendor = "Nvidia"
+		details.Driver = "Nvidia Game Ready (552.44)"
+		details.VRAMUsed = "3.2 GB"
+		details.VRAMTotal = "12.0 GB"
+		details.VRAMFree = "8.8 GB"
+		details.Temperature = "62.0 °C"
+		details.OpenGL = "OpenGL 4.6 NVIDIA 552.44"
+		details.Vulkan = "Vulkan 1.3.278"
+		details.OpenCL = "OpenCL 3.0 CUDA"
+		details.CUDA = "release 12.4"
+	}
+	return details
+}
+
+// GetMockProcessList returns a mock list of processes
+func GetMockProcessList() []ProcessInfo {
+	return []ProcessInfo{
+		{PID: 1042, Name: "kernelview", CPU: 0.8, RAM: 45 * 1024 * 1024},
+		{PID: 3012, Name: "firefox", CPU: 12.5, RAM: 820 * 1024 * 1024},
+		{PID: 4511, Name: "vscode", CPU: 4.2, RAM: 450 * 1024 * 1024},
+		{PID: 1205, Name: "discord", CPU: 2.1, RAM: 180 * 1024 * 1024},
+		{PID: 902, Name: "systemd", CPU: 0.1, RAM: 15 * 1024 * 1024},
+		{PID: 1512, Name: "kitty", CPU: 1.5, RAM: 60 * 1024 * 1024},
+		{PID: 2804, Name: "postgres", CPU: 0.3, RAM: 120 * 1024 * 1024},
+	}
+}
+
+// GetMockNetworkDetails returns mock network statistics
+func GetMockNetworkDetails() *NetworkInfo {
+	return &NetworkInfo{
+		Hostname:   "mock-pc",
+		PrivateIP:  "192.168.1.100",
+		MACAddress: "00:11:22:33:44:55",
+		PublicIP:   "203.0.113.50",
+		ISP:        "Mock Telecom",
+		City:       "New York",
+		Country:    "United States",
+		DNSServers: []string{"1.1.1.1", "8.8.8.8"},
+		Ping:       "14.5 ms",
+		IOCounters: "Rx: 45.0 GB / Tx: 5.0 GB",
+	}
+}
+
+// GetMockLiveMetrics returns real-time live TUI metrics for the mock distro
+func GetMockLiveMetrics(distro string) *LiveMetrics {
+	sysInfo := GetMockSystemInfo(distro)
+
+	var numCores int
+	switch distro {
+	case "arch":
+		numCores = 16
+	case "ubuntu":
+		numCores = 20
+	case "macos":
+		numCores = 16
+	case "windows":
+		numCores = 32
+	default:
+		numCores = 8
+	}
+
+	cpuCores := make([]float64, numCores)
+	for i := range cpuCores {
+		cpuCores[i] = 5.0 + float64(time.Now().UnixNano()%40)
+	}
+
+	var usedMem, totalMem uint64
+	switch distro {
+	case "arch":
+		usedMem = 8500 * 1024 * 1024
+		totalMem = 32000 * 1024 * 1024
+	case "ubuntu":
+		usedMem = 4100 * 1024 * 1024
+		totalMem = 16000 * 1024 * 1024
+	case "macos":
+		usedMem = 12300 * 1024 * 1024
+		totalMem = 48000 * 1024 * 1024
+	case "windows":
+		usedMem = 14200 * 1024 * 1024
+		totalMem = 64000 * 1024 * 1024
+	default:
+		usedMem = 2000 * 1024 * 1024
+		totalMem = 8000 * 1024 * 1024
+	}
+
+	var temp float64
+	fmt.Sscanf(sysInfo.Temperature, "%f", &temp)
+
+	gpuDetails := GetMockGPUDetails(distro)
+	var gpuTemp float64
+	fmt.Sscanf(gpuDetails.Temperature, "%f", &gpuTemp)
+
+	var gpuMemUsed, gpuMemTotal uint64
+	fmt.Sscanf(gpuDetails.VRAMUsed, "%d", &gpuMemUsed)
+	fmt.Sscanf(gpuDetails.VRAMTotal, "%d", &gpuMemTotal)
+
+	gpuMetrics := LiveGPUMetrics{
+		HasGPU:      gpuDetails.Vendor != "Unknown" && gpuDetails.Vendor != "Generic",
+		GPUUsage:    10.0 + float64(time.Now().UnixNano()%30),
+		GPUMemUsage: 25.0 + float64(time.Now().UnixNano()%10),
+		GPUMemUsed:  gpuMemUsed,
+		GPUMemTotal: gpuMemTotal,
+		GPUTemp:     gpuTemp,
+	}
+
+	return &LiveMetrics{
+		Uptime:      sysInfo.Uptime,
+		CPUUsage:    20.0 + float64(time.Now().UnixNano()%15),
+		CPUCores:    cpuCores,
+		RAMUsed:     usedMem,
+		RAMTotal:    totalMem,
+		RAMPercent:  (float64(usedMem) / float64(totalMem)) * 100.0,
+		SwapUsed:    1000 * 1024 * 1024,
+		SwapTotal:   4000 * 1024 * 1024,
+		SwapPercent: 25.0,
+		DiskUsed:    150000 * 1024 * 1024,
+		DiskTotal:   1000000 * 1024 * 1024,
+		DiskPercent: 15.0,
+		Temperature: temp,
+		NetIface:    "eth0",
+		NetRxSpeed:  12500000,
+		NetTxSpeed:  1500000,
+		NetRxTotal:  45000000000,
+		NetTxTotal:  5000000000,
+		Processes:   GetMockProcessList(),
+		GPUMetrics:  gpuMetrics,
+	}
+}

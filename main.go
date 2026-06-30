@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 
 	"KernelView-Go/display"
 	"KernelView-Go/gather"
@@ -15,7 +16,7 @@ import (
 var version = "v1.0.0"
 
 // handleJSONOutput handles all --json flag requests
-func handleJSONOutput(processFlag, networkFlag, fastFlag bool) {
+func handleJSONOutput(processFlag, networkFlag, gpuFlag, fastFlag bool) {
 	encoder := json.NewEncoder(os.Stdout)
 	encoder.SetIndent("", "  ") // Pretty-print JSON
 
@@ -32,6 +33,8 @@ func handleJSONOutput(processFlag, networkFlag, fastFlag bool) {
 		if err != nil {
 			log.Printf("Warning: Encountered errors fetching network details: %v", err)
 		}
+	} else if gpuFlag {
+		data = gather.GetGPUDetails()
 	} else {
 		data = gather.GetSystemInfo(fastFlag)
 	}
@@ -56,6 +59,10 @@ func main() {
 	flag.BoolVar(&networkFlag, "network", false, "Display detailed network information.")
 	flag.BoolVar(&networkFlag, "n", false, "Display detailed network information (shorthand).")
 
+	var gpuFlag bool
+	flag.BoolVar(&gpuFlag, "gpu", false, "Display detailed GPU and graphics API report.")
+	flag.BoolVar(&gpuFlag, "g", false, "Display detailed GPU and graphics API report (shorthand).")
+
 	var liveFlag bool
 	flag.BoolVar(&liveFlag, "live", false, "Start real-time live system monitoring dashboard.")
 	flag.BoolVar(&liveFlag, "l", false, "Start real-time live system monitoring dashboard (shorthand).")
@@ -70,6 +77,9 @@ func main() {
 	var noColorFlag bool
 	flag.BoolVar(&noColorFlag, "no-color", false, "Disable all color and formatting.")
 
+	var mockFlag string
+	flag.StringVar(&mockFlag, "mock", "", "Mock a system setup for testing (arch, ubuntu, macos, windows).")
+	flag.StringVar(&mockFlag, "m", "", "Mock a system setup for testing (shorthand).")
 
 	// Custom usage message
 	flag.Usage = func() {
@@ -88,6 +98,12 @@ func main() {
 
 	flag.Parse()
 
+	// Handle mock environment override
+	if mockFlag != "" {
+		display.MockDistro = strings.ToLower(mockFlag)
+		gather.MockDistro = strings.ToLower(mockFlag)
+	}
+
 	// --- Handle Priority Flags ---
 
 	// 1. Version flag
@@ -104,19 +120,28 @@ func main() {
 
 	// 2. Check for mutually exclusive modes
 	modeCount := 0
-	if fastFlag { modeCount++ }
-	if processFlag { modeCount++ }
-	if networkFlag { modeCount++ }
+	if fastFlag {
+		modeCount++
+	}
+	if processFlag {
+		modeCount++
+	}
+	if networkFlag {
+		modeCount++
+	}
+	if gpuFlag {
+		modeCount++
+	}
 
 	if modeCount > 1 {
-		fmt.Fprintf(os.Stderr, "Error: -f, -p, and -n flags are mutually exclusive.\n\n")
+		fmt.Fprintf(os.Stderr, "Error: -f, -p, -n, and -g flags are mutually exclusive.\n\n")
 		flag.Usage()
 		os.Exit(1)
 	}
 
 	// 3. Handle JSON output
 	if jsonFlag {
-		handleJSONOutput(processFlag, networkFlag, fastFlag)
+		handleJSONOutput(processFlag, networkFlag, gpuFlag, fastFlag)
 		os.Exit(0)
 	}
 
@@ -129,6 +154,8 @@ func main() {
 		mode = "process"
 	} else if networkFlag {
 		mode = "network"
+	} else if gpuFlag {
+		mode = "gpu"
 	}
 
 	// Select theme
@@ -139,7 +166,6 @@ func main() {
 	} else {
 		currentTheme = display.NormalTheme
 	}
-
 
 	// --- Execute Selected Mode ---
 	switch mode {
@@ -157,8 +183,11 @@ func main() {
 		if networkInfo != nil {
 			display.DisplayNetworkInfo(networkInfo, currentTheme)
 		} else {
-             log.Fatalf("Error getting network details.")
-        }
+			log.Fatalf("Error getting network details.")
+		}
+	case "gpu":
+		gpuDetails := gather.GetGPUDetails()
+		display.DisplayGPUInfo(gpuDetails, currentTheme)
 	default: // "system" mode
 		info := gather.GetSystemInfo(fastFlag) // Pass fastFlag here
 		display.DisplaySystemInfo(info, currentTheme)

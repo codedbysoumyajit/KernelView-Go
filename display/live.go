@@ -8,8 +8,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"golang.org/x/term"
 	"KernelView-Go/gather"
+	"golang.org/x/term"
 )
 
 type EventType int
@@ -25,11 +25,11 @@ type Event struct {
 }
 
 type LiveDisplay struct {
-	tracker   *gather.LiveTracker
-	static    *gather.SystemInfo
-	isFast    bool
-	tab       string
-	termWidth int
+	tracker    *gather.LiveTracker
+	static     *gather.SystemInfo
+	isFast     bool
+	tab        string
+	termWidth  int
 	termHeight int
 }
 
@@ -366,7 +366,7 @@ func (ld *LiveDisplay) renderDashboard(metrics *gather.LiveMetrics, theme Theme)
 		resLines = append(resLines, formatBoxLine("Swap", "None", boxWidth-4, theme))
 	}
 	resLines = append(resLines, fmt.Sprintf("%sDisk (/) %s\033[90m: %s", theme.Key, theme.Reset, drawLiveProgressBar(metrics.DiskPercent, boxWidth-15, theme)))
-	
+
 	cpuTempStr := "N/A"
 	if metrics.Temperature > 0 {
 		cpuTempStr = fmt.Sprintf("%.1f °C", metrics.Temperature)
@@ -378,7 +378,7 @@ func (ld *LiveDisplay) renderDashboard(metrics *gather.LiveMetrics, theme Theme)
 	if metrics.GPUMetrics.HasGPU {
 		// Line 1: Usage
 		gpuLines = append(gpuLines, fmt.Sprintf("%sGPU Usage%s\033[90m: %s", theme.Key, theme.Reset, drawLiveProgressBar(metrics.GPUMetrics.GPUUsage, boxWidth-15, theme)))
-		
+
 		// Line 2: Memory Progress Bar
 		if metrics.GPUMetrics.GPUMemUsage > 0 {
 			gpuLines = append(gpuLines, fmt.Sprintf("%sGPU Mem  %s\033[90m: %s", theme.Key, theme.Reset, drawLiveProgressBar(metrics.GPUMetrics.GPUMemUsage, boxWidth-15, theme)))
@@ -549,17 +549,17 @@ func (ld *LiveDisplay) renderDashboard(metrics *gather.LiveMetrics, theme Theme)
 
 	hwBox := drawBox("Hardware Specs", hwLines, boxWidth, theme)
 	resBox := drawBox("Resource Monitor", resLines, boxWidth, theme)
-	
+
 	var gpuBox []string
 	if metrics.GPUMetrics.HasGPU {
 		gpuBox = drawBox("GPU Monitor", gpuLines, boxWidth, theme)
 	}
-	
+
 	procBox := drawBox("Top Processes", procLines, boxWidth, theme)
 
 	// Display columns
 	leftCol := append(sysBox, netBox...)
-	
+
 	var rightCol []string
 	if metrics.GPUMetrics.HasGPU {
 		rightCol = append(hwBox, append(resBox, append(gpuBox, procBox...)...)...)
@@ -590,7 +590,7 @@ func (ld *LiveDisplay) renderProcesses(metrics *gather.LiveMetrics, theme Theme)
 	var procLines []string
 	procLines = append(procLines, fmt.Sprintf("%s%-*s %-*s %*s %*s %*s%s",
 		theme.Key, pidWidth, "PID", nameWidth, "NAME", cpuWidth, "CPU%", ramWidth, "RAM", ramPercWidth, "RAM%", theme.Reset))
-	procLines = append(procLines, "\033[90m" + strings.Repeat("─", totalWidth) + theme.Reset)
+	procLines = append(procLines, "\033[90m"+strings.Repeat("─", totalWidth)+theme.Reset)
 
 	headerPadding := 8
 	if ld.termHeight < 20 {
@@ -658,7 +658,7 @@ func (ld *LiveDisplay) renderNetwork(metrics *gather.LiveMetrics, theme Theme) {
 		}
 		netLines = append(netLines, "")
 	}
-	
+
 	colW := 15
 	if w < 55 {
 		colW = 12
@@ -889,19 +889,19 @@ func (ld *LiveDisplay) renderCores(metrics *gather.LiveMetrics, theme Theme) {
 				break
 			}
 
-			// Left core
+			// Left CPU thread
 			coreLeftVal := metrics.CPUCores[i]
-			// Label is "Core XX: " -> "Core XX" is 7 chars. ": " is 2 chars. Total = 9.
-			// Progress bar takes colWidth - 9.
-			leftBar := drawLiveProgressBar(coreLeftVal, colWidth-9, theme)
-			leftPart := fmt.Sprintf("%sCore %-2d%s\033[90m: %s", theme.Key, i, theme.Reset, leftBar)
+			// Label is "CPU XX: " -> "CPU XX" is 6 chars. ": " is 2 chars. Total = 8.
+			// Progress bar takes colWidth - 8.
+			leftBar := drawLiveProgressBar(coreLeftVal, colWidth-8, theme)
+			leftPart := fmt.Sprintf("%sCPU %-2d%s\033[90m: %s", theme.Key, i, theme.Reset, leftBar)
 
 			rightPart := ""
 			if i+1 < numCores {
-				// Right core
+				// Right CPU thread
 				coreRightVal := metrics.CPUCores[i+1]
-				rightBar := drawLiveProgressBar(coreRightVal, colWidth-9, theme)
-				rightPart = fmt.Sprintf("%sCore %-2d%s\033[90m: %s", theme.Key, i+1, theme.Reset, rightBar)
+				rightBar := drawLiveProgressBar(coreRightVal, colWidth-8, theme)
+				rightPart = fmt.Sprintf("%sCPU %-2d%s\033[90m: %s", theme.Key, i+1, theme.Reset, rightBar)
 			} else {
 				rightPart = strings.Repeat(" ", colWidth)
 			}
@@ -915,7 +915,7 @@ func (ld *LiveDisplay) renderCores(metrics *gather.LiveMetrics, theme Theme) {
 		coreLines = append(coreLines, "No per-core CPU telemetry available.")
 	}
 
-	box := drawBox("CPU Cores Telemetry", coreLines, w, theme)
+	box := drawBox("Per-CPU Telemetry", coreLines, w, theme)
 	for _, line := range box {
 		fmt.Printf("%s\r\n", line)
 	}

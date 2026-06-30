@@ -8,8 +8,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"golang.org/x/term"
 	"KernelView-Go/gather"
+	"golang.org/x/term"
 )
 
 // Theme struct to hold color definitions (exported)
@@ -21,20 +21,23 @@ type Theme struct {
 	Reset    string
 }
 
+// MockDistro is set at runtime to simulate other environments (Exported)
+var MockDistro string
+
 // Define the standard themes (exported)
 var (
 	NormalTheme = Theme{
-		Category: "\033[34m",      // Bright Blue
+		Category: "\033[34m",       // Bright Blue
 		Key:      "\033[38;5;255m", // White
 		Value:    "\033[38;5;249m", // Light Gray
-		Accent:   "\033[34m",      // Bright Blue
+		Accent:   "\033[34m",       // Bright Blue
 		Reset:    "\033[0m",
 	}
 	FastTheme = Theme{
-		Category: "\033[36m",      // Bright Cyan
+		Category: "\033[36m",       // Bright Cyan
 		Key:      "\033[38;5;255m", // White
 		Value:    "\033[38;5;249m", // Light Gray
-		Accent:   "\033[36m",      // Bright Cyan
+		Accent:   "\033[36m",       // Bright Cyan
 		Reset:    "\033[0m",
 	}
 	BlankTheme = Theme{
@@ -92,6 +95,9 @@ func getUsername() string {
 }
 
 func getDistroKey() string {
+	if MockDistro != "" {
+		return MockDistro
+	}
 	if runtime.GOOS == "windows" {
 		return "windows"
 	}
@@ -384,7 +390,6 @@ func DisplayLayout(logoKey string, infoLines []string, theme Theme) {
 // DisplaySystemInfo formats and prints the system info (exported).
 func DisplaySystemInfo(info *gather.SystemInfo, theme Theme) {
 
-
 	distroKey := getDistroKey()
 	theme = GetThemeForDistro(distroKey, theme == BlankTheme)
 
@@ -464,9 +469,182 @@ func DisplaySystemInfo(info *gather.SystemInfo, theme Theme) {
 	DisplayLayout(distroKey, infoLines, theme)
 }
 
+// GPULogos holds vendor-specific ASCII art logos for graphics cards
+var GPULogos = map[string][]string{
+	"nvidia": {
+		"  _   ___     _____ ____ ___    _   ",
+		" | \\ | \\ \\   / /_ _|  _ \\_ _|  / \\  ",
+		" |  \\| |\\ \\ / / | || | | | |  / _ \\ ",
+		" | |\\  | \\ V /  | || |_| | | / ___ \\",
+		" |_| \\_|  \\_/  |___|____/___/_/   \\_\\",
+	},
+	"amd": {
+		"  _    __  __ ____  ",
+		" / \\  |  \\/  |  _ \\ ",
+		"/ _ \\ | |\\/| | | | |",
+		" ___ \\| |  | | |_| |",
+		"_/   \\_\\_|  |_|____/ ",
+	},
+	"intel": {
+		" ___ _   _ _____ _____ _     ",
+		"|_ _| \\ | |_   _| ____| |    ",
+		" | ||  \\| | | | |  _| | |    ",
+		" | || |\\  | | | | |___| |___ ",
+		"|___|_| \\_| |_| |_____|_____|",
+	},
+	"generic": {
+		"  ____ ____  _   _ ",
+		" / ___|  _ \\| | | |",
+		"| |  _| |_) | | | |",
+		"| |_| |  __/| |_| |",
+		" \\____|_|    \\___/ ",
+	},
+}
+
+// DisplayGPUInfo formats and prints detailed GPU and graphics API information (exported).
+func DisplayGPUInfo(info *gather.GPUDetails, theme Theme) {
+	vendorKey := strings.ToLower(info.Vendor)
+
+	if theme != BlankTheme {
+		switch vendorKey {
+		case "nvidia":
+			theme = Theme{
+				Category: "\033[32m",       // Green
+				Key:      "\033[38;5;82m",  // Bright Green
+				Value:    "\033[38;5;249m", // Light Gray
+				Accent:   "\033[38;5;82m",  // Bright Green
+				Reset:    "\033[0m",
+			}
+		case "amd":
+			theme = Theme{
+				Category: "\033[31m",       // Red
+				Key:      "\033[38;5;196m", // Bright Red
+				Value:    "\033[38;5;249m", // Light Gray
+				Accent:   "\033[38;5;196m", // Bright Red
+				Reset:    "\033[0m",
+			}
+		case "intel":
+			theme = Theme{
+				Category: "\033[34m",       // Blue
+				Key:      "\033[38;5;33m",  // Intel Blue
+				Value:    "\033[38;5;249m", // Light Gray
+				Accent:   "\033[38;5;33m",  // Intel Blue
+				Reset:    "\033[0m",
+			}
+		default:
+			distroKey := getDistroKey()
+			theme = GetThemeForDistro(distroKey, false)
+		}
+	}
+
+	termWidth := getTerminalWidth()
+	logoWidth := 0
+
+	var logoLines []string
+	var exists bool
+	logoLines, exists = GPULogos[vendorKey]
+	if !exists {
+		logoLines = GPULogos["generic"]
+	}
+
+	for _, l := range logoLines {
+		runesCount := utf8.RuneCountInString(l)
+		if runesCount > logoWidth {
+			logoWidth = runesCount
+		}
+	}
+
+	var infoLines []string
+
+	username := getUsername()
+	hostname, _ := os.Hostname()
+	if hostname == "" {
+		hostname = "unknown"
+	}
+
+	header := fmt.Sprintf("%s%s%s@%s%s%s", theme.Key, username, theme.Reset, theme.Key, hostname, theme.Reset)
+	infoLines = append(infoLines, header)
+
+	separator := theme.Value + strings.Repeat("-", len(username)+1+len(hostname)) + theme.Reset
+	infoLines = append(infoLines, separator)
+
+	items := []struct{ Key, Value string }{
+		{"GPU Model", info.Name},
+		{"Vendor", info.Vendor},
+		{"Driver", info.Driver},
+		{"VRAM Used", info.VRAMUsed},
+		{"VRAM Total", info.VRAMTotal},
+		{"VRAM Free", info.VRAMFree},
+		{"Temperature", info.Temperature},
+		{"OpenGL", info.OpenGL},
+		{"Vulkan", info.Vulkan},
+		{"OpenCL", info.OpenCL},
+		{"CUDA", info.CUDA},
+	}
+
+	for _, item := range items {
+		val := strings.TrimSpace(item.Value)
+		if val != "" && val != "Unknown" && val != "None" && val != "N/A" {
+			valAllowed := termWidth - logoWidth - 3 - len(item.Key) - 4
+			if valAllowed > 5 {
+				val = truncateString(val, valAllowed)
+			}
+			line := fmt.Sprintf("%s%s%s: %s%s%s", theme.Key, item.Key, theme.Reset, theme.Value, val, theme.Reset)
+			infoLines = append(infoLines, line)
+		}
+	}
+
+	blocks := getColorBlocks(theme)
+	if blocks != "" {
+		infoLines = append(infoLines, "")
+		blockLines := strings.Split(blocks, "\n")
+		for _, bl := range blockLines {
+			infoLines = append(infoLines, bl)
+		}
+	}
+
+	// Draw side-by-side or stacked layout using the vendor logo
+	sideBySide := termWidth >= logoWidth+45
+	if sideBySide {
+		maxLines := len(logoLines)
+		if len(infoLines) > maxLines {
+			maxLines = len(infoLines)
+		}
+
+		for i := 0; i < maxLines; i++ {
+			logoLine := ""
+			runeLen := 0
+			if i < len(logoLines) {
+				logoLine = theme.Accent + logoLines[i] + theme.Reset
+				runeLen = utf8.RuneCountInString(logoLines[i])
+			} else {
+				logoLine = strings.Repeat(" ", logoWidth)
+			}
+
+			if runeLen < logoWidth && i < len(logoLines) {
+				logoLine += strings.Repeat(" ", logoWidth-runeLen)
+			}
+
+			infoLine := ""
+			if i < len(infoLines) {
+				infoLine = infoLines[i]
+			}
+
+			fmt.Printf("%s   %s\n", logoLine, infoLine)
+		}
+	} else {
+		for _, l := range logoLines {
+			fmt.Println(theme.Accent + l + theme.Reset)
+		}
+		fmt.Println()
+		for _, l := range infoLines {
+			fmt.Println(l)
+		}
+	}
+}
+
 // DisplayProcessList formats and prints the process list (Wider & Centered Title).
 func DisplayProcessList(processList []gather.ProcessInfo, theme Theme) {
-
 
 	distroKey := getDistroKey()
 	theme = GetThemeForDistro(distroKey, theme == BlankTheme)
@@ -578,7 +756,6 @@ func DisplayProcessList(processList []gather.ProcessInfo, theme Theme) {
 
 // DisplayNetworkInfo formats and prints detailed network info (Exported)
 func DisplayNetworkInfo(info *gather.NetworkInfo, theme Theme) {
-
 
 	distroKey := getDistroKey()
 	theme = GetThemeForDistro(distroKey, theme == BlankTheme)
@@ -697,11 +874,13 @@ func PrintHelp(version string, noColor bool) {
 	fmt.Printf("  %s-l, --live%s         %sStart real-time TUI dashboard (interactive, multi-tab)%s\n", theme.Key, theme.Reset, theme.Value, theme.Reset)
 	fmt.Printf("  %s-p, --process%s      %sDisplay static list of running processes%s\n", theme.Key, theme.Reset, theme.Value, theme.Reset)
 	fmt.Printf("  %s-n, --network%s      %sDisplay detailed static network interfaces & stats%s\n", theme.Key, theme.Reset, theme.Value, theme.Reset)
+	fmt.Printf("  %s-g, --gpu%s          %sDisplay detailed static GPU & graphics API report%s\n", theme.Key, theme.Reset, theme.Value, theme.Reset)
 	fmt.Printf("  %s[default]%s          %sDisplay system fetch (fastfetch-like distro ASCII logo & specs)%s\n\n", theme.Key, theme.Reset, theme.Value, theme.Reset)
 
 	// Section 3: Configuration Options
 	fmt.Printf("%sCONFIGURATION OPTIONS:%s\n", theme.Accent, theme.Reset)
 	fmt.Printf("  %s-f, --fast%s         %sRun system fetch in fast mode (skips slow subsystem checks)%s\n", theme.Key, theme.Reset, theme.Value, theme.Reset)
+	fmt.Printf("  %s-m, --mock%s         %sMock a system environment (arch, ubuntu, macos, windows)%s\n", theme.Key, theme.Reset, theme.Value, theme.Reset)
 	fmt.Printf("  %s--json%s             %sOutput information as structured JSON%s\n", theme.Key, theme.Reset, theme.Value, theme.Reset)
 	fmt.Printf("  %s--no-color%s         %sDisable all ANSI color formatting%s\n\n", theme.Key, theme.Reset, theme.Value, theme.Reset)
 
@@ -719,6 +898,9 @@ func PrintHelp(version string, noColor bool) {
 	fmt.Printf("%sEXAMPLES:%s\n", theme.Accent, theme.Reset)
 	fmt.Printf("  $ kernelview --live            %s# Open the live TUI dashboard%s\n", "\033[90m", theme.Reset)
 	fmt.Printf("  $ kernelview -p --json         %s# Fetch running processes in JSON format%s\n", "\033[90m", theme.Reset)
+	fmt.Printf("  $ kernelview -g                %s# Display detailed GPU and graphics API report%s\n", "\033[90m", theme.Reset)
+	fmt.Printf("  $ kernelview -m arch           %s# Mock Arch Linux system fetch%s\n", "\033[90m", theme.Reset)
+	fmt.Printf("  $ kernelview -m windows -l     %s# Open TUI dashboard simulating Windows 11%s\n", "\033[90m", theme.Reset)
 	fmt.Printf("  $ kernelview -f                %s# Fast system fetch with ASCII logo%s\n\n", "\033[90m", theme.Reset)
 
 	// Footer with Color Grid blocks
@@ -727,4 +909,3 @@ func PrintHelp(version string, noColor bool) {
 		fmt.Printf("%s\n\n", blocks)
 	}
 }
-

@@ -75,10 +75,12 @@ DISPLAY MODES:
   -l, --live         Start real-time TUI dashboard (interactive, multi-tab)
   -p, --process      Display static list of running processes
   -n, --network      Display detailed static network interfaces & stats
+  -g, --gpu          Display detailed static GPU & graphics API report
   [default]          Display system fetch (fastfetch-like distro ASCII logo & specs)
 
 CONFIGURATION OPTIONS:
   -f, --fast         Run system fetch in fast mode (skips slow subsystem checks)
+  -m, --mock         Mock a system environment (arch, ubuntu, macos, windows)
   --json             Output information as structured JSON
   --no-color         Disable all ANSI color formatting
 
@@ -92,6 +94,9 @@ TUI INTERACTIVE KEYS:
 EXAMPLES:
   $ kernelview --live            # Open the live TUI dashboard
   $ kernelview -p --json         # Fetch running processes in JSON format
+  $ kernelview -g                # Display detailed GPU and graphics API report
+  $ kernelview -m arch           # Mock Arch Linux system fetch
+  $ kernelview -m windows -l     # Open TUI dashboard simulating Windows 11
   $ kernelview -f                # Fast system fetch with ASCII logo
 ```
 

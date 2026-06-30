@@ -35,8 +35,28 @@ curl -fsSL "$URL" -o kernelview.tar.gz
 echo "Extracting..."
 tar -xzf kernelview.tar.gz kernelview
 
-echo "Installing to /usr/local/bin (requires sudo)..."
-sudo mv kernelview /usr/local/bin/
+# Determine installation directory
+if [ -n "$PREFIX" ]; then
+    INSTALL_DIR="$PREFIX/bin"
+    echo "Termux environment detected. Installing to $INSTALL_DIR..."
+    mv kernelview "$INSTALL_DIR/"
+else
+    INSTALL_DIR="/usr/local/bin"
+    echo "Installing to $INSTALL_DIR (requires sudo)..."
+    sudo mv kernelview "$INSTALL_DIR/"
+fi
 
 rm -f kernelview.tar.gz
+
+# Check if PATH contains installation directory
+case ":$PATH:" in
+    *:"$INSTALL_DIR":*) ;;
+    *) 
+        echo ""
+        echo "⚠️  WARNING: $INSTALL_DIR is not in your PATH environment variable."
+        echo "You may need to add it to your shell profile (e.g. ~/.bashrc or ~/.zshrc):"
+        echo "  export PATH=\"\$PATH:$INSTALL_DIR\""
+        ;;
+esac
+
 echo "KernelView Go installed successfully! Run 'kernelview' in your terminal."
