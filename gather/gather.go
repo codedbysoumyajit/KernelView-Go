@@ -1,5 +1,5 @@
 package gather
-
+  
 import (
 	"bufio"
 	"encoding/json"
