@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -34,15 +36,48 @@ type LiveDisplay struct {
 }
 
 func StartLiveDashboard(isFast bool) {
+	fd := int(os.Stdin.Fd())
+	var oldState *term.State
+	var errRaw error
+
+	restored := false
+	cleanup := func() {
+		if !restored {
+			restored = true
+			if oldState != nil {
+				_ = term.Restore(fd, oldState)
+			}
+			fmt.Print("\033[?25h\033[?1049l\033[0m") // Show cursor, exit alt screen buffer, reset formatting
+		}
+	}
+	defer cleanup()
+
+	defer func() {
+		if r := recover(); r != nil {
+			cleanup()
+			fmt.Printf("\r\nKernelView Live Dashboard encountered an error: %v\r\n", r)
+		}
+	}()
+
 	// Switch to alternate screen buffer, home the cursor, and hide it
 	fmt.Print("\033[?1049h\033[H\033[?25l")
-	defer fmt.Print("\033[?1049l\033[?25h") // Restore main buffer and cursor on exit
 
 	// Set terminal raw mode
-	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
-	if err == nil {
-		defer term.Restore(int(os.Stdin.Fd()), oldState)
+	oldState, errRaw = term.MakeRaw(fd)
+	if errRaw != nil {
+		oldState = nil
 	}
+
+	// Trap OS interrupt signals to cleanly restore terminal
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
+	defer signal.Stop(sigChan)
+
+	go func() {
+		<-sigChan
+		cleanup()
+		os.Exit(0)
+	}()
 
 	events := make(chan Event)
 	tracker := gather.NewLiveTracker()
@@ -51,6 +86,7 @@ func StartLiveDashboard(isFast bool) {
 
 	// Background resolver for packages count and slow metrics
 	go func() {
+		defer func() { _ = recover() }()
 		fullInfo := gather.GetSystemInfo(false)
 		if fullInfo != nil {
 			if fullInfo.Packages != "" && fullInfo.Packages != "N/A" {
@@ -61,6 +97,7 @@ func StartLiveDashboard(isFast bool) {
 
 	// Input reader goroutine
 	go func() {
+		defer func() { _ = recover() }()
 		var buf [1]byte
 		for {
 			n, err := os.Stdin.Read(buf[:])
@@ -71,10 +108,11 @@ func StartLiveDashboard(isFast bool) {
 		}
 	}()
 
-	// Ticker goroutine for live updates (refresh twice a second for high responsiveness!)
+	// Ticker goroutine for live updates
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 	go func() {
+		defer func() { _ = recover() }()
 		for range ticker.C {
 			events <- Event{Type: Tick}
 		}

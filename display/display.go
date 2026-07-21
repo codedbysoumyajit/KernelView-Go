@@ -49,12 +49,12 @@ var (
 	}
 )
 
+var ansiRegexp = regexp.MustCompile("\x1b\\[[0-9;?]*[a-zA-Z]")
+
 // --- Internal Helper Functions ---
 
 func stripAnsi(s string) string {
-	// Match escape character followed by [ and optional numbers/semicolons and m
-	re := regexp.MustCompile("\x1b\\[[0-9;]*m")
-	return re.ReplaceAllString(s, "")
+	return ansiRegexp.ReplaceAllString(s, "")
 }
 
 func Max(x, y int) int {
@@ -492,6 +492,30 @@ var GPULogos = map[string][]string{
 		" | || |\\  | | | | |___| |___ ",
 		"|___|_| \\_| |_| |_____|_____|",
 	},
+	"qualcomm": {
+		"   _  _ ___  ___ ___ _  _  ___  ",
+		"  /_\\|   \\ _ \\| __| \\| |/ _ \\ ",
+		" / _ \\ |) |   /| _|| .` | (_) |",
+		"/_/ \\_\\___/|_|_\\___|_|\\_|\\___/ ",
+	},
+	"arm": {
+		" __  __   _   _    ___ ",
+		"|  \\/  | /_\\ | |  |_ _|",
+		"| |\\/| |/ _ \\| |__ | | ",
+		"|_|  |_/_/ \\_\\____|___|",
+	},
+	"samsung": {
+		" ___   _   __  __ ___ _  _ _  _  ___ ",
+		"/ __| /_\\ |  \\/  / __| | | | \\| |/ __|",
+		"\\__ \\/ _ \\| |\\/| \\__ \\ |_| | .` | (_ |",
+		"|___/_/ \\_\\_|  |_|___/\\___/|_|\\_|\\___|",
+	},
+	"apple": {
+		"   _   ___ ___ _    ___ ",
+		"  /_\\ | _ \\ _ \\ |  | __|",
+		" / _ \\|  _/  _/ |__| _| ",
+		"/_/ \\_\\_| |_| |____|___|",
+	},
 	"generic": {
 		"  ____ ____  _   _ ",
 		" / ___|  _ \\| | | |",
@@ -529,6 +553,38 @@ func DisplayGPUInfo(info *gather.GPUDetails, theme Theme) {
 				Key:      "\033[38;5;33m",  // Intel Blue
 				Value:    "\033[38;5;249m", // Light Gray
 				Accent:   "\033[38;5;33m",  // Intel Blue
+				Reset:    "\033[0m",
+			}
+		case "qualcomm":
+			theme = Theme{
+				Category: "\033[31m",       // Red/Orange
+				Key:      "\033[38;5;208m", // Qualcomm Orange
+				Value:    "\033[38;5;249m", // Light Gray
+				Accent:   "\033[38;5;208m", // Qualcomm Orange
+				Reset:    "\033[0m",
+			}
+		case "arm":
+			theme = Theme{
+				Category: "\033[36m",       // Cyan
+				Key:      "\033[38;5;51m",  // Bright Cyan
+				Value:    "\033[38;5;249m", // Light Gray
+				Accent:   "\033[38;5;51m",  // Bright Cyan
+				Reset:    "\033[0m",
+			}
+		case "samsung":
+			theme = Theme{
+				Category: "\033[34m",       // Blue
+				Key:      "\033[38;5;39m",  // Samsung Blue
+				Value:    "\033[38;5;249m", // Light Gray
+				Accent:   "\033[38;5;39m",  // Samsung Blue
+				Reset:    "\033[0m",
+			}
+		case "apple":
+			theme = Theme{
+				Category: "\033[37m",       // White/Silver
+				Key:      "\033[38;5;255m", // Bright White
+				Value:    "\033[38;5;249m", // Light Gray
+				Accent:   "\033[38;5;255m", // Bright White
 				Reset:    "\033[0m",
 			}
 		default:
