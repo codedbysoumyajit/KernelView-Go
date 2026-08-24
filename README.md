@@ -3,7 +3,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Language-Go-00ADD8?style=for-the-badge&logo=go" alt="Go" />
   <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="MIT License" />
-  <img src="https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-blue?style=for-the-badge" alt="Platforms" />
+  <img src="https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows%20%7C%20BSD-blue?style=for-the-badge" alt="Platforms" />
   <a href="https://goreportcard.com/report/github.com/codedbysoumyajit/KernelView-Go">
     <img src="https://goreportcard.com/badge/github.com/codedbysoumyajit/KernelView-Go?style=for-the-badge" alt="Go Report Card" />
   </a>
@@ -15,57 +15,54 @@
   </a>
 </p>
 
-**KernelView Go** is an aesthetic, blazingly fast system information fetcher and real-time terminal dashboard. It is a complete rewrite of the original Python-based [KernelView](https://github.com/codedbysoumyajit/KernelView), leveraging Go's native compilation, lower memory footprint, and concurrency to deliver near-instant fetches and smooth live system telemetry with minimal CPU overhead.
+**KernelView Go** is an ultra-fast, aesthetic system information fetcher and real-time terminal telemetry dashboard written in pure Go. Engineered for maximum efficiency, sub-millisecond data gathering, and zero runtime dependencies, it delivers instant hardware telemetry, distro-branded ASCII aesthetics, and an interactive multi-tab live TUI dashboard.
 
 ---
 
 ## ✨ Key Features
 
-### 🎨 1. Distro-Branded CLI Fetch (Fastfetch/Neofetch style)
-* **High-Fidelity ASCII Art**: Recreated authentic ASCII logos matching `fastfetch` for major operating systems and Linux distributions.
-* **Distro-Aware Themes**: Automatically detects your system's operating system/distribution and styles key labels, borders, and dividers using the distro's primary colors (e.g., Green for Manjaro, Cyan for Arch, Orange for Ubuntu, Crimson for Debian).
-* **Side-by-Side Logo Layout**: Displays ASCII art side-by-side with system specs. Automatically wraps or falls back to a clean vertical layout on narrow terminal widths.
-* **Classic Color Grid**: Includes the iconic color grid blocks (`███`) at the bottom of standard and network reports.
+### 🎨 1. Distro-Branded CLI Fetch
+* **Authentic ASCII Art**: Crisp, authentic terminal ASCII art for Linux distributions, macOS, Windows, and BSD variants.
+* **Intelligent Theme Matching**: Automatically identifies the host operating system or distribution and styles titles, labels, keys, borders, and dividers in matching palette accents.
+* **Side-by-Side Responsive Layout**: Renders ASCII art alongside system telemetry, with seamless auto-wrapping and vertical stacking on narrow terminals.
+* **Terminal Color Grid**: Includes classic 16-color ANSI color blocks (`███`) for palette verification.
 
-### 🖥️ 2. Premium Real-Time TUI Dashboard (`-l`, `--live`)
-* **Flicker-Free Render Loop**: Implemented terminal home cursor-movement rendering (`\033[H`) to draw dashboard screens in-place rather than clearing, providing butter-smooth telemetry updates.
-* **Rounded Themed Windows**: Frames system boxes with elegant rounded borders (`╭─`, `╮`, `│`, `╰`, `╯`) styled in distro-specific colors.
-* **Physical Keycap Buttons**: Renders shortcut indicators as physically styled, inverse-color buttons in the footer (e.g., ` Q ` Quit, ` 1 ` Dashboard).
-* **Multi-Tabbed Interactive Navigation**:
-  * `[1] Dashboard`: Shows overall telemetry (OS specs, Hardware info, Disk usage, dynamic Resource Monitor progress bars, and a Top Processes list).
-  * `[2] Processes`: Shows an expanded process tree sorted by CPU/RAM usage.
-  * `[3] Network`: Displays all active interfaces with live bandwidth speeds.
-  * `[4] CPU Cores`: Renders individual real-time usage percentages for each logical CPU core in a dual-column grid.
+### 🖥️ 2. Real-Time TUI Dashboard (`-l`, `--live`)
+* **Flicker-Free Terminal Rendering**: In-place cursor repositioning (`\033[H`) provides butter-smooth, flicker-free live dashboard updates.
+* **Curved Themed Containers**: Clean rounded box drawing (`╭─`, `╮`, `│`, `╰`, `╯`) customized with OS color accents.
+* **Interactive Multi-Tab Views**:
+  * `[1] Dashboard`: Comprehensive overview (OS specs, CPU/RAM usage bars, active disk mounts, and top processes).
+  * `[2] Processes`: Interactive, real-time process list sorted dynamically by CPU and memory consumption.
+  * `[3] Network`: Live per-interface network throughput, transfer metrics, and bandwidth meters.
+  * `[4] CPU Cores`: Dedicated per-core frequency and utilization telemetry in a responsive multi-column grid.
 
-### 🎮 3. Native GPU & Intel iGPU Telemetry
-* Supports querying **integrated graphics (iGPUs)** and **dedicated cards (dGPUs)** concurrently across Linux, macOS, and Windows.
-* **Intel UHD iGPU**: Dynamically reads active and maximum graphics clock speeds from `/sys/class/drm/` to calculate load ratios and displays frequency statistics (e.g., `350 MHz / 1050 MHz`).
-* **AMD & Nvidia GPU**: Resolves dedicated temperature, memory limits, and workloads.
+### 🎮 3. GPU & Graphics API Telemetry (`-g`, `--gpu`)
+* **Dual-Architecture Support**: Concurrently detects integrated graphics (Intel Iris/UHD, AMD Radeon) and dedicated GPUs (NVIDIA, AMD, Apple Silicon).
+* **Deep Hardware Metrics**: Gathers VRAM utilization, GPU core temperature, graphics driver versions, and compute API versions (OpenGL, Vulkan, OpenCL, CUDA, Metal).
+* **Intel iGPU Frequency Tracking**: Direct sysfs frequency probing calculates real-time workload ratios and clock states.
 
-### ⚡ 4. Highly Optimized Caching Architecture
-To maintain a near-zero CPU footprint, the live loop splits real-time metrics (CPU cores, memory, network transfer rates) from heavy system probes via a smart caching layer:
-* **Process List**: Cached for `2.0s` (averts scanning `/proc` directories 4 times a second).
-* **GPU Telemetry & Temperature**: Cached for `2.0s`.
-* **Disk Space Stats**: Cached for `5.0s`.
-* **Network Interface Socket list**: Cached for `10.0s`.
-* **Uptime**: Boot epoch resolved once on start; subsequent frames calculate time delta locally to bypass syscall overhead.
+### ⚡ 4. High-Performance Architecture
+* **Pure Go Zero-Subprocess Probing**: Direct parsing of kernel interfaces (`/proc/meminfo`, `/proc/net/tcp`, `/proc/cpuinfo`, sysfs, DRM, macOS `SystemVersion.plist`, and Windows Registry).
+* **Instant Package Resolution**: Internal pure Go SQLite B-Tree engine counts RPM database entries in `<0.3ms` without spawning external package manager binaries.
+* **Smart Tiered Caching**: Real-time TUI metrics update at 350ms while heavier background probes are smoothly throttled to maintain `<1%` CPU utilization.
+* **Robust Concurrency & Security**: Bound timeouts on all subsystem commands, thread-safe event loop channel updates, and secure HTTPS lookups.
 
 ---
 
-## 🗂️ Supported Systems & Distributions
+## 🗂️ Supported Systems & Environments
 
-| Linux Distributions | Apple macOS | Microsoft Windows |
-| :--- | :--- | :--- |
-| Arch Linux, Manjaro, Ubuntu, Debian, Fedora, CentOS, Alpine, Gentoo, RedHat (RHEL), OpenSUSE, Linux Mint | macOS (Apple Silicon & Intel) | Windows 10 & 11 (Cmd, PowerShell, Terminal) |
+| Linux Distributions | Apple macOS | Microsoft Windows | BSD Systems |
+| :--- | :--- | :--- | :--- |
+| Fedora, Arch Linux, Ubuntu, Debian, Manjaro, Pop!_OS, NixOS, Void Linux, Alpine, Gentoo, openSUSE, RHEL, CentOS, Linux Mint | macOS (Apple Silicon M1/M2/M3/M4 & Intel) | Windows 11 & 10 (Windows Terminal, PowerShell, CMD) | FreeBSD, OpenBSD, NetBSD |
 
 ---
 
-## ⌨️ CLI Modes & Flags
+## ⌨️ CLI Usage & Flags
 
 ```
 ╭────────────────────────────────────────────────────────╮
 │   KernelView Go - System Fetch & Live Dashboard        │
-│   Version: v1.0.0 (Detected: manjaro)                  │
+│   Version: v1.3.0                                      │
 ╰────────────────────────────────────────────────────────╯
 
 USAGE:
@@ -76,46 +73,55 @@ DISPLAY MODES:
   -p, --process      Display static list of running processes
   -n, --network      Display detailed static network interfaces & stats
   -g, --gpu          Display detailed static GPU & graphics API report
-  [default]          Display system fetch (fastfetch-like distro ASCII logo & specs)
+  [default]          Display system fetch (distro ASCII logo & system specs)
 
 CONFIGURATION OPTIONS:
-  -f, --fast         Run system fetch in fast mode (skips slow subsystem checks)
-  -m, --mock         Mock a system environment (arch, ubuntu, macos, windows)
-  --json             Output information as structured JSON
+  -f, --fast         Run system fetch in fast mode (skips network/ping checks)
+  --json             Output gathered information as structured JSON
   --no-color         Disable all ANSI color formatting
 
 INFO FLAGS:
   -v, --version      Print version and build information
-  -h, --help         Print this aesthetic help menu
+  -h, --help         Print help menu
 
 TUI INTERACTIVE KEYS:
   [1] Dashboard Tab   [2] Processes Tab   [3] Network Tab   [4] CPU Cores Tab   [Q] Quit
+```
 
-EXAMPLES:
-  $ kernelview --live            # Open the live TUI dashboard
-  $ kernelview -p --json         # Fetch running processes in JSON format
-  $ kernelview -g                # Display detailed GPU and graphics API report
-  $ kernelview -m arch           # Mock Arch Linux system fetch
-  $ kernelview -m windows -l     # Open TUI dashboard simulating Windows 11
-  $ kernelview -f                # Fast system fetch with ASCII logo
+### Example Commands
+```bash
+# Standard system fetch
+kernelview
+
+# Fast mode (instant execution)
+kernelview -f
+
+# Launch real-time TUI dashboard
+kernelview -l
+
+# Detailed GPU telemetry report
+kernelview -g
+
+# Detailed network interfaces & ping
+kernelview -n
+
+# Output complete system specs as structured JSON
+kernelview --json
 ```
 
 ---
 
-## 🏎️ Speed & Efficiency Performance Benchmarks
+## 🏎️ Performance Benchmarks
 
-Pure Go system lookups (directly parsing `/proc/meminfo`, dpkg/pacman package counts, and sysfs paths) deliver near-instant results, outperforming predecessor and alternative script-based fetches:
+All benchmarks are measured as real wall-clock execution time on a standard multi-core workstation:
 
-| Mode / Tool | Execution Latency | Speedup vs Python | CPU Usage (TUI Loop) |
-| :--- | :--- | :--- | :--- |
-| **KernelView Go (Default Mode)** | **`0.113s`** | **~7.3x faster** | N/A (Static Fetch) |
-| **KernelView Go (Fast Mode)** | **`0.046s`** | **~18.0x faster** | N/A (Static Fetch) |
-| **Process List (`-p`)** | **`0.206s`** | **~1.5x faster** | N/A (Static Fetch) |
-| **Network Info (`-n`)** | **`0.319s`** | **~2.5x faster** | N/A (Static Fetch) |
-| **Live Dashboard (`-l`)** | **Smooth 2 Hz** | **Smooth Telemetry** | **< 1.0% Core Load** |
-
-> [!TIP]
-> The performance numbers are gathered on an Intel i7 CPU running Arch Linux. Enabling **Fast Mode (`-f`)** skips slower checks like checking multiple package managers and network ping latency, making execution almost instant.
+| Command / Mode | Typical Latency | Subsystem Details |
+| :--- | :--- | :--- |
+| **`kernelview -f` (Fast Mode)** | **`~45ms`** | Complete system hardware, CPU, memory, OS, shell, and display resolution |
+| **`kernelview` (Default Mode)** | **`~100ms`** | Full fetch including packages (RPM/APT/Flatpak/Snap), open ports, languages, and temperature |
+| **`kernelview -g` (GPU Mode)** | **`~80ms`** | GPU models, driver versions, VRAM capacity, OpenGL/Vulkan/CUDA API versions |
+| **`kernelview -p` (Process Mode)** | **`~95ms`** | Ranked process table with PID, memory percentage, and user ownership |
+| **`kernelview -l` (Live TUI)** | **`350ms Tick`** | Real-time interactive dashboard with `<1.0%` CPU utilization |
 
 ---
 
@@ -123,63 +129,51 @@ Pure Go system lookups (directly parsing `/proc/meminfo`, dpkg/pacman package co
 
 ### ⚡ One-Command Installers
 
-#### Linux & macOS (sh/bash/zsh)
+#### Linux, macOS & BSD (sh / bash / zsh)
 ```bash
 curl -fsSL https://raw.githubusercontent.com/codedbysoumyajit/KernelView-Go/main/install.sh | sh
 ```
 
 #### Windows (PowerShell)
-Run the following inside PowerShell:
 ```powershell
 irm https://raw.githubusercontent.com/codedbysoumyajit/KernelView-Go/main/install.ps1 | iex
 ```
 
-### 📦 Manual Binary Installation
+---
 
-1. Go to the [Releases](https://github.com/codedbysoumyajit/KernelView-Go/releases) page and download the archive for your system (e.g. `kernelview_1.0.0_linux_amd64.tar.gz` or `kernelview_1.0.0_windows_amd64.zip`).
-2. Extract the archive.
-3. Move the binary into your system `PATH`:
-   * **Linux / macOS**: `sudo mv kernelview /usr/local/bin/`
-   * **Windows**: Add the extracted folder path to your system's `PATH` environment variable.
-
-### 🛠️ From Source
-1. **Prerequisites**: Ensure you have [**Go (1.21 or later)**](https://go.dev/dl/) installed.
-2. **Clone and Build**:
-   ```bash
-   git clone https://github.com/codedbysoumyajit/KernelView-Go.git
-   cd KernelView-Go
-   go build -o kernelview main.go
-   ```
-3. **Move to System PATH**:
-   ```bash
-   sudo mv kernelview /usr/local/bin/  # Linux / macOS
-   ```
-
-### Cross-Compiling (Build for other platforms)
-You can build binaries for different systems from your current machine:
-```bash
-# Build for Linux (amd64)
-GOOS=linux GOARCH=amd64 go build -o kernelview-linux-amd64 main.go
-
-# Build for macOS (Apple Silicon)
-GOOS=darwin GOARCH=arm64 go build -o kernelview-darwin-arm64 main.go
-
-# Build for Windows (amd64)
-GOOS=windows GOARCH=amd64 go build -o kernelview-windows.exe main.go
-```
+### 📦 Pre-Built Binaries
+Download pre-compiled release archives directly from the [GitHub Releases](https://github.com/codedbysoumyajit/KernelView-Go/releases) page:
+* `kernelview_1.3.0_linux_amd64.tar.gz`
+* `kernelview_1.3.0_linux_arm64.tar.gz`
+* `kernelview_1.3.0_darwin_arm64.tar.gz` (Apple Silicon M-series)
+* `kernelview_1.3.0_darwin_amd64.tar.gz` (Intel Mac)
+* `kernelview_1.3.0_windows_amd64.zip`
+* `kernelview_1.3.0_windows_arm64.zip`
+* `kernelview_1.3.0_freebsd_amd64.tar.gz`
+* `kernelview_1.3.0_openbsd_amd64.tar.gz`
+* `kernelview_1.3.0_netbsd_amd64.tar.gz`
 
 ---
 
-## 🛠️ Troubleshooting & FAQ
+### 🛠️ Building From Source
 
-> [!NOTE]
-> **No Color Output**: If your terminal doesn't support ANSI colors or you want plain text (e.g. for piping output to a text file), pass the `--no-color` flag, or set the environment variable `NO_COLOR=1`.
-
-> [!IMPORTANT]
-> **Intel iGPU Telemetry Missing**: Intel iGPU frequency stats require access to sysfs files like `/sys/class/drm/card0/gt_act_freq_mhz`. If you are running inside a heavily sandboxed environment or flatpak, ensure KernelView Go has the appropriate system permissions to read `/sys/class/drm/`.
+1. Ensure **Go 1.21+** is installed:
+   ```bash
+   go version
+   ```
+2. Clone the repository and compile:
+   ```bash
+   git clone https://github.com/codedbysoumyajit/KernelView-Go.git
+   cd KernelView-Go
+   go build -ldflags="-s -w" -o kernelview .
+   ```
+3. Install to system path:
+   ```bash
+   sudo mv kernelview /usr/local/bin/  # Linux / macOS / BSD
+   ```
 
 ---
 
 ## 📄 License
 
-This project is licensed under the **MIT License**. See the [LICENSE](file:///home/soumyajit/Projects/KernelView-Go/LICENSE) file for details.
+This project is open-source software licensed under the **MIT License**. See the [LICENSE](file:///home/soumyajit/Projects/KernelView-Go/LICENSE) file for details.

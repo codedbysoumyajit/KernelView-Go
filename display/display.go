@@ -21,9 +21,6 @@ type Theme struct {
 	Reset    string
 }
 
-// MockDistro is set at runtime to simulate other environments (Exported)
-var MockDistro string
-
 // Define the standard themes (exported)
 var (
 	NormalTheme = Theme{
@@ -95,53 +92,117 @@ func getUsername() string {
 }
 
 func getDistroKey() string {
-	if MockDistro != "" {
-		return MockDistro
-	}
 	if runtime.GOOS == "windows" {
 		return "windows"
 	}
 	if runtime.GOOS == "darwin" {
 		return "macos"
 	}
+	if runtime.GOOS == "freebsd" {
+		return "freebsd"
+	}
+	if runtime.GOOS == "openbsd" {
+		return "openbsd"
+	}
+	if runtime.GOOS == "netbsd" {
+		return "netbsd"
+	}
 
-	// Read standard /etc/os-release
-	osReleasePaths := []string{"/etc/os-release"}
+	// Read standard /etc/os-release or /usr/lib/os-release
+	osReleasePaths := []string{"/etc/os-release", "/usr/lib/os-release"}
+	if prefix := os.Getenv("PREFIX"); prefix != "" {
+		osReleasePaths = append(osReleasePaths, prefix+"/etc/os-release")
+	}
 
 	for _, path := range osReleasePaths {
 		if content, err := os.ReadFile(path); err == nil {
 			contentStr := strings.ToLower(string(content))
-			if strings.Contains(contentStr, "manjaro") {
+			lines := strings.Split(contentStr, "\n")
+			var id, idLike string
+			for _, line := range lines {
+				line = strings.TrimSpace(line)
+				if strings.HasPrefix(line, "id=") {
+					id = strings.Trim(strings.TrimPrefix(line, "id="), "\"'\r ")
+				}
+				if strings.HasPrefix(line, "id_like=") {
+					idLike = strings.Trim(strings.TrimPrefix(line, "id_like="), "\"'\r ")
+				}
+			}
+
+			// Exact ID match first
+			switch id {
+			case "manjaro":
+				return "manjaro"
+			case "arch":
+				return "arch"
+			case "pop":
+				return "pop"
+			case "nixos":
+				return "nixos"
+			case "void":
+				return "void"
+			case "ubuntu":
+				return "ubuntu"
+			case "debian":
+				return "debian"
+			case "fedora":
+				return "fedora"
+			case "centos":
+				return "centos"
+			case "rhel", "redhat":
+				return "redhat"
+			case "alpine":
+				return "alpine"
+			case "gentoo":
+				return "gentoo"
+			case "opensuse", "suse", "opensuse-tumbleweed", "opensuse-leap":
+				return "opensuse"
+			case "linuxmint", "mint":
+				return "mint"
+			}
+
+			// Substring / id_like fallback
+			combined := id + " " + idLike + " " + contentStr
+			if strings.Contains(combined, "manjaro") {
 				return "manjaro"
 			}
-			if strings.Contains(contentStr, "arch") {
+			if strings.Contains(combined, "pop!_os") || strings.Contains(combined, "pop-os") || strings.Contains(combined, "pop_os") {
+				return "pop"
+			}
+			if strings.Contains(combined, "nixos") {
+				return "nixos"
+			}
+			if strings.Contains(combined, "void") {
+				return "void"
+			}
+			if strings.Contains(combined, "arch") || strings.Contains(combined, "endeavouros") {
 				return "arch"
 			}
-			if strings.Contains(contentStr, "ubuntu") {
+			if strings.Contains(combined, "ubuntu") {
 				return "ubuntu"
 			}
-			if strings.Contains(contentStr, "debian") {
+			if strings.Contains(combined, "debian") {
 				return "debian"
 			}
-			if strings.Contains(contentStr, "fedora") {
+			if strings.Contains(combined, "fedora") {
 				return "fedora"
 			}
-			if strings.Contains(contentStr, "centos") {
+			if strings.Contains(combined, "centos") {
 				return "centos"
 			}
-			if strings.Contains(contentStr, "redhat") || strings.Contains(contentStr, "red hat") {
+			if strings.Contains(combined, "redhat") || strings.Contains(combined, "red hat") || strings.Contains(combined, "rhel") {
 				return "redhat"
 			}
-			if strings.Contains(contentStr, "alpine") {
+			if strings.Contains(combined, "alpine") {
 				return "alpine"
 			}
-			if strings.Contains(contentStr, "gentoo") {
+			if strings.Contains(combined, "gentoo") {
 				return "gentoo"
 			}
-			if strings.Contains(contentStr, "suse") || strings.Contains(contentStr, "opensuse") {
+			if strings.Contains(combined, "suse") || strings.Contains(combined, "opensuse") {
 				return "opensuse"
 			}
-			if strings.Contains(contentStr, "mint") {
+			if strings.Contains(combined, "mint") {
 				return "mint"
 			}
 		}
@@ -182,6 +243,30 @@ func GetThemeForDistro(distroKey string, noColor bool) Theme {
 			Accent:   "\033[1;38;5;208m",
 			Reset:    reset,
 		}
+	case "pop":
+		return Theme{
+			Category: "\033[1;36m", // Bold Cyan / Teal
+			Key:      "\033[1;36m",
+			Value:    valColor,
+			Accent:   "\033[1;36m",
+			Reset:    reset,
+		}
+	case "nixos":
+		return Theme{
+			Category: "\033[1;38;5;75m", // Bold Soft Blue
+			Key:      "\033[1;38;5;75m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;75m",
+			Reset:    reset,
+		}
+	case "void":
+		return Theme{
+			Category: "\033[1;32m", // Bold Green
+			Key:      "\033[1;32m",
+			Value:    valColor,
+			Accent:   "\033[1;32m",
+			Reset:    reset,
+		}
 	case "debian":
 		return Theme{
 			Category: "\033[1;38;5;161m", // Bold Crimson
@@ -212,6 +297,30 @@ func GetThemeForDistro(distroKey string, noColor bool) Theme {
 			Key:      "\033[1;38;5;33m",
 			Value:    valColor,
 			Accent:   "\033[1;38;5;33m",
+			Reset:    reset,
+		}
+	case "freebsd":
+		return Theme{
+			Category: "\033[1;31m", // Bold Red
+			Key:      "\033[1;31m",
+			Value:    valColor,
+			Accent:   "\033[1;31m",
+			Reset:    reset,
+		}
+	case "openbsd":
+		return Theme{
+			Category: "\033[1;33m", // Bold Yellow
+			Key:      "\033[1;33m",
+			Value:    valColor,
+			Accent:   "\033[1;33m",
+			Reset:    reset,
+		}
+	case "netbsd":
+		return Theme{
+			Category: "\033[1;38;5;208m", // Bold Orange
+			Key:      "\033[1;38;5;208m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;208m",
 			Reset:    reset,
 		}
 	case "alpine":
@@ -919,7 +1028,6 @@ func PrintHelp(version string, noColor bool) {
 	// Section 3: Configuration Options
 	fmt.Printf("%sCONFIGURATION OPTIONS:%s\n", theme.Accent, theme.Reset)
 	fmt.Printf("  %s-f, --fast%s         %sRun system fetch in fast mode (skips slow subsystem checks)%s\n", theme.Key, theme.Reset, theme.Value, theme.Reset)
-	fmt.Printf("  %s-m, --mock%s         %sMock a system environment (arch, ubuntu, macos, windows)%s\n", theme.Key, theme.Reset, theme.Value, theme.Reset)
 	fmt.Printf("  %s--json%s             %sOutput information as structured JSON%s\n", theme.Key, theme.Reset, theme.Value, theme.Reset)
 	fmt.Printf("  %s--no-color%s         %sDisable all ANSI color formatting%s\n\n", theme.Key, theme.Reset, theme.Value, theme.Reset)
 
@@ -938,8 +1046,6 @@ func PrintHelp(version string, noColor bool) {
 	fmt.Printf("  $ kernelview --live            %s# Open the live TUI dashboard%s\n", "\033[90m", theme.Reset)
 	fmt.Printf("  $ kernelview -p --json         %s# Fetch running processes in JSON format%s\n", "\033[90m", theme.Reset)
 	fmt.Printf("  $ kernelview -g                %s# Display detailed GPU and graphics API report%s\n", "\033[90m", theme.Reset)
-	fmt.Printf("  $ kernelview -m arch           %s# Mock Arch Linux system fetch%s\n", "\033[90m", theme.Reset)
-	fmt.Printf("  $ kernelview -m windows -l     %s# Open TUI dashboard simulating Windows 11%s\n", "\033[90m", theme.Reset)
 	fmt.Printf("  $ kernelview -f                %s# Fast system fetch with ASCII logo%s\n\n", "\033[90m", theme.Reset)
 
 	// Footer with Color Grid blocks

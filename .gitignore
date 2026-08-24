@@ -36,6 +36,9 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+.*.swp
+*.kate-swp
+.*.kate-swp
 *~
 *.sublime-project
 *.sublime-workspace

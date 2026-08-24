@@ -2,8 +2,12 @@ package gather
 
 import (
 	"bufio"
+	"bytes"
+	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -29,10 +33,8 @@ var (
 	rePingWin      = regexp.MustCompile(`Average\s*=\s*(\d+)ms`)
 	rePingUnix     = regexp.MustCompile(`(rtt|round-trip)\s+min/avg/max/(mdev|stddev)\s+=\s+([0-9.]+)/([0-9.]+)/([0-9.]+)/([0-9.]+)`)
 	rePingUnixTime = regexp.MustCompile(`time=([0-9.]+)`)
+	reValidHost    = regexp.MustCompile(`^[a-zA-Z0-9.\-_:]+$`)
 )
-
-// MockDistro is set at runtime to simulate other environments (Exported)
-var MockDistro string
 
 // SystemInfo holds all collected system data. Exported for use in main.
 type SystemInfo struct {
@@ -101,7 +103,9 @@ type ipAPIResponse struct {
 // --- Internal Helper Functions ---
 
 func runCommand(name string, arg ...string) string {
-	cmd := exec.Command(name, arg...)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, arg...)
 	cmd.Stderr = nil
 	out, err := cmd.Output()
 	if err != nil {
@@ -111,11 +115,13 @@ func runCommand(name string, arg ...string) string {
 }
 
 func runShellCommand(command string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
-		cmd = exec.Command("powershell", "-NoProfile", "-Command", command)
+		cmd = exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command", command)
 	} else {
-		cmd = exec.Command("sh", "-c", command)
+		cmd = exec.CommandContext(ctx, "sh", "-c", command)
 	}
 	cmd.Stderr = nil
 	out, err := cmd.Output()
@@ -137,6 +143,47 @@ func FormatBytes(b uint64) string {
 		return fmt.Sprintf("%.0f KB", float64(b)/(1<<10))
 	}
 	return fmt.Sprintf("%d B", b)
+}
+
+func getWindowsRegValue(key, valName string) string {
+	if runtime.GOOS != "windows" {
+		return ""
+	}
+	out := runCommand("reg", "query", key, "/v", valName)
+	if out == "" {
+		return ""
+	}
+	lines := strings.Split(out, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(strings.ToLower(line), strings.ToLower(valName)) {
+			fields := strings.Fields(line)
+			if len(fields) >= 3 {
+				return strings.Join(fields[2:], " ")
+			}
+		}
+	}
+	return ""
+}
+
+func extractPlistString(data []byte, key string) string {
+	keyTag := "<key>" + key + "</key>"
+	idx := bytes.Index(data, []byte(keyTag))
+	if idx == -1 {
+		return ""
+	}
+	sub := data[idx+len(keyTag):]
+	startTag := []byte("<string>")
+	endTag := []byte("</string>")
+	sIdx := bytes.Index(sub, startTag)
+	if sIdx == -1 {
+		return ""
+	}
+	eIdx := bytes.Index(sub[sIdx+len(startTag):], endTag)
+	if eIdx == -1 {
+		return ""
+	}
+	return strings.TrimSpace(string(sub[sIdx+len(startTag) : sIdx+len(startTag)+eIdx]))
 }
 
 // --- Gathering Functions ---
@@ -169,17 +216,22 @@ func getHostModel() string {
 			}
 		}
 	case "darwin":
-		cmd := exec.Command("sysctl", "-n", "hw.model")
-		if out, err := cmd.Output(); err == nil {
-			return strings.TrimSpace(string(out))
+		if model := runCommand("sysctl", "-n", "hw.model"); model != "" {
+			return model
 		}
 	case "windows":
-		cmd := exec.Command("wmic", "computersystem", "get", "model")
-		if out, err := cmd.Output(); err == nil {
-			lines := strings.Split(string(out), "\n")
-			if len(lines) > 1 {
+		if model := getWindowsRegValue(`HKLM\HARDWARE\DESCRIPTION\System\BIOS`, "SystemProductName"); model != "" && model != "System Product Name" {
+			return model
+		}
+		if model := runCommand("wmic", "computersystem", "get", "model"); model != "" {
+			lines := strings.Split(model, "\n")
+			if len(lines) > 1 && strings.TrimSpace(lines[1]) != "" {
 				return strings.TrimSpace(lines[1])
 			}
+		}
+	case "freebsd", "openbsd", "netbsd":
+		if model := runCommand("sysctl", "-n", "hw.model"); model != "" {
+			return model
 		}
 	}
 	return ""
@@ -251,8 +303,74 @@ func gatherHostInfo(info *SystemInfo, wg *sync.WaitGroup) {
 	info.Hostname, _ = os.Hostname()
 }
 
+func getLinuxCPUInfo() (model string, speed string, coresThreads string) {
+	data, err := os.ReadFile("/proc/cpuinfo")
+	if err != nil {
+		return "", "", ""
+	}
+	lines := strings.Split(string(data), "\n")
+	var cpuModel string
+	var mhz float64
+	processors := 0
+	coreIDs := make(map[string]bool)
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "model name") || strings.HasPrefix(line, "Processor") || strings.HasPrefix(line, "Hardware") {
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) == 2 && cpuModel == "" {
+				cpuModel = strings.TrimSpace(parts[1])
+			}
+		}
+		if strings.HasPrefix(line, "cpu MHz") {
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) == 2 && mhz == 0 {
+				mhz, _ = strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
+			}
+		}
+		if strings.HasPrefix(line, "processor") {
+			processors++
+		}
+		if strings.HasPrefix(line, "core id") {
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) == 2 {
+				coreIDs[strings.TrimSpace(parts[1])] = true
+			}
+		}
+	}
+
+	if mhz > 1000 {
+		speed = fmt.Sprintf("%.2f GHz", mhz/1000.0)
+	} else if mhz > 0 {
+		speed = fmt.Sprintf("%.0f MHz", mhz)
+	}
+
+	physicalCores := len(coreIDs)
+	if physicalCores == 0 {
+		physicalCores = processors
+	}
+	if processors > 0 {
+		coresThreads = fmt.Sprintf("%d/%d", physicalCores, processors)
+	}
+
+	return cpuModel, speed, coresThreads
+}
+
 func gatherCPUInfo(info *SystemInfo, wg *sync.WaitGroup, isFast bool) {
 	defer wg.Done()
+
+	if runtime.GOOS == "linux" {
+		model, speed, ct := getLinuxCPUInfo()
+		if model != "" {
+			info.CPU = model
+		}
+		if speed != "" && info.CPUSpeed == "" {
+			info.CPUSpeed = speed
+		}
+		if ct != "" {
+			info.CoresThreads = ct
+		}
+	}
 
 	if info.CPU == "" || info.CPU == "Unknown Processor" || strings.HasPrefix(info.CPU, "ARMv") || strings.HasPrefix(info.CPU, "AArch64") {
 		cpuStats, err := cpu.Info()
@@ -273,12 +391,14 @@ func gatherCPUInfo(info *SystemInfo, wg *sync.WaitGroup, isFast bool) {
 		info.CPU = "Unknown Processor"
 	}
 
-	cores, _ := cpu.Counts(false)
-	threads, _ := cpu.Counts(true)
-	info.CoresThreads = fmt.Sprintf("%d/%d", cores, threads)
+	if info.CoresThreads == "" || info.CoresThreads == "0/0" {
+		cores, _ := cpu.Counts(false)
+		threads, _ := cpu.Counts(true)
+		info.CoresThreads = fmt.Sprintf("%d/%d", cores, threads)
+	}
 
 	if !isFast {
-		percentages, err := cpu.Percent(100*time.Millisecond, false)
+		percentages, err := cpu.Percent(0, false)
 		if err == nil && len(percentages) > 0 {
 			info.CPUUsage = fmt.Sprintf("%.1f%%", percentages[0])
 		} else {
@@ -433,20 +553,50 @@ func getOSInfo() string {
 			return fmt.Sprintf("%s %s", platform, version)
 		}
 	case "windows":
-		productName := runShellCommand("(Get-CimInstance Win32_OperatingSystem).Caption")
-		buildNumber := runShellCommand("(Get-CimInstance Win32_OperatingSystem).BuildNumber")
-		if productName != "" {
-			productName = strings.TrimSpace(strings.Replace(productName, "Microsoft ", "", 1))
-			if buildNumber != "" {
-				return fmt.Sprintf("%s (Build %s)", productName, buildNumber)
+		// Fast registry lookup
+		prodName := getWindowsRegValue(`HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion`, "ProductName")
+		displayVer := getWindowsRegValue(`HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion`, "DisplayVersion")
+		currentBuild := getWindowsRegValue(`HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion`, "CurrentBuild")
+		if prodName != "" {
+			prodName = strings.TrimPrefix(prodName, "Microsoft ")
+			if displayVer != "" && currentBuild != "" {
+				return fmt.Sprintf("%s %s (Build %s)", prodName, displayVer, currentBuild)
+			} else if currentBuild != "" {
+				return fmt.Sprintf("%s (Build %s)", prodName, currentBuild)
 			}
-			return productName
+			return prodName
+		}
+		productName := runCommand("wmic", "os", "get", "Caption")
+		if productName != "" {
+			lines := strings.Split(productName, "\n")
+			if len(lines) > 1 && strings.TrimSpace(lines[1]) != "" {
+				return strings.TrimPrefix(strings.TrimSpace(lines[1]), "Microsoft ")
+			}
 		}
 	case "darwin":
+		// Fast plist reading
+		if data, err := os.ReadFile("/System/Library/CoreServices/SystemVersion.plist"); err == nil {
+			prodVer := extractPlistString(data, "ProductUserVisibleVersion")
+			if prodVer == "" {
+				prodVer = extractPlistString(data, "ProductVersion")
+			}
+			buildVer := extractPlistString(data, "ProductBuildVersion")
+			if prodVer != "" && buildVer != "" {
+				return fmt.Sprintf("macOS %s (%s)", prodVer, buildVer)
+			} else if prodVer != "" {
+				return fmt.Sprintf("macOS %s", prodVer)
+			}
+		}
 		productVersion := runCommand("sw_vers", "-productVersion")
 		buildVersion := runCommand("sw_vers", "-buildVersion")
 		if productVersion != "" {
 			return fmt.Sprintf("macOS %s (%s)", productVersion, buildVersion)
+		}
+	case "freebsd", "openbsd", "netbsd":
+		ostype := runCommand("sysctl", "-n", "kern.ostype")
+		osrelease := runCommand("sysctl", "-n", "kern.osrelease")
+		if ostype != "" && osrelease != "" {
+			return fmt.Sprintf("%s %s", ostype, osrelease)
 		}
 	}
 	h, _ := host.Info()
@@ -461,14 +611,14 @@ func getShell() string {
 			return "Unknown"
 		}
 	} else {
-		if os.Getenv("PSModulePath") != "" {
+		if os.Getenv("WT_SESSION") != "" {
+			return "Windows Terminal"
+		} else if os.Getenv("PSModulePath") != "" {
 			shellPath = "powershell"
 		} else if os.Getenv("ComSpec") != "" {
 			shellPath = "cmd"
-		} else if os.Getenv("WT_SESSION") != "" {
-			return "Windows Terminal"
 		} else {
-			return "Unknown"
+			return "Command Prompt"
 		}
 	}
 
@@ -485,7 +635,11 @@ func getShell() string {
 			version = reShellVersion.FindString(firstLine)
 		}
 	case "powershell":
-		version = runShellCommand("$PSVersionTable.PSVersion.Major")
+		if psVer := getWindowsRegValue(`HKLM\SOFTWARE\Microsoft\PowerShell\3\PowerShellEngine`, "PowerShellVersion"); psVer != "" {
+			version = psVer
+		} else {
+			version = runCommand("powershell", "-NoProfile", "-NonInteractive", "-Command", "$PSVersionTable.PSVersion.Major")
+		}
 	}
 
 	titleName := strings.Title(shellName)
@@ -550,40 +704,109 @@ func getLinuxGPU() string {
 func getGPUInfo() string {
 	switch runtime.GOOS {
 	case "windows":
-		output := runShellCommand("(Get-CimInstance Win32_VideoController).Caption")
-		lines := strings.Split(output, "\n")
-		var gpus []string
-		for _, line := range lines {
-			t := strings.TrimSpace(line)
-			if t != "" {
-				gpus = append(gpus, t)
-			}
+		if name := getWindowsRegValue(`HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0000`, "DriverDesc"); name != "" {
+			return name
 		}
-		if len(gpus) > 0 {
-			return strings.Join(gpus, ", ")
+		out := runCommand("wmic", "path", "win32_VideoController", "get", "Caption")
+		if out != "" {
+			lines := strings.Split(out, "\n")
+			var gpus []string
+			for _, line := range lines {
+				t := strings.TrimSpace(line)
+				if t != "" && t != "Caption" {
+					gpus = append(gpus, t)
+				}
+			}
+			if len(gpus) > 0 {
+				return strings.Join(gpus, ", ")
+			}
 		}
 		return "Unknown"
 	case "linux":
 		return getLinuxGPU()
 	case "darwin":
-		output := runShellCommand("system_profiler SPDisplaysDataType | grep 'Chipset Model' | cut -d ':' -f2")
-		lines := strings.Split(output, "\n")
-		var gpus []string
-		for _, line := range lines {
-			t := strings.TrimSpace(line)
-			if t != "" {
-				gpus = append(gpus, t)
+		out := runCommand("system_profiler", "SPDisplaysDataType")
+		if out != "" {
+			lines := strings.Split(out, "\n")
+			var gpus []string
+			for _, line := range lines {
+				if strings.Contains(line, "Chipset Model:") {
+					parts := strings.SplitN(line, ":", 2)
+					if len(parts) == 2 {
+						gpu := strings.TrimSpace(parts[1])
+						if gpu != "" {
+							gpus = append(gpus, gpu)
+						}
+					}
+				}
+			}
+			if len(gpus) > 0 {
+				return strings.Join(gpus, ", ")
 			}
 		}
-		if len(gpus) > 0 {
-			return strings.Join(gpus, ", ")
+		cpuBrand := runCommand("sysctl", "-n", "machdep.cpu.brand_string")
+		if strings.Contains(cpuBrand, "Apple") {
+			return cpuBrand + " GPU"
 		}
 		return "Unknown"
+	case "freebsd", "openbsd", "netbsd":
+		return getLinuxGPU()
 	}
 	return "Unknown"
 }
 
+func getLinuxOpenPorts() string {
+	portSet := make(map[int]struct{})
+	for _, path := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {
+		f, err := os.Open(path)
+		if err != nil {
+			continue
+		}
+		scanner := bufio.NewScanner(f)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			fields := strings.Fields(line)
+			if len(fields) < 4 || fields[0] == "sl" {
+				continue
+			}
+			// fields[3] is state: "0A" is TCP_LISTEN (10)
+			if fields[3] == "0A" {
+				addrParts := strings.Split(fields[1], ":")
+				if len(addrParts) == 2 {
+					if port, err := strconv.ParseInt(addrParts[1], 16, 64); err == nil && port > 0 {
+						portSet[int(port)] = struct{}{}
+					}
+				}
+			}
+		}
+		f.Close()
+	}
+	if len(portSet) == 0 {
+		return "None"
+	}
+	ports := make([]int, 0, len(portSet))
+	for p := range portSet {
+		ports = append(ports, p)
+	}
+	sort.Ints(ports)
+	var portStrings []string
+	for _, p := range ports {
+		portStrings = append(portStrings, strconv.Itoa(p))
+	}
+	limit := 8
+	if len(portStrings) > limit {
+		return strings.Join(portStrings[:limit], ", ") + "..."
+	}
+	return strings.Join(portStrings, ", ")
+}
+
 func getOpenPorts() string {
+	if runtime.GOOS == "linux" {
+		if res := getLinuxOpenPorts(); res != "" {
+			return res
+		}
+	}
+
 	conns, err := psnet.Connections("tcp")
 	if err != nil {
 		return "Unknown"
@@ -644,7 +867,7 @@ func getInstalledLanguages() string {
 }
 
 func getIPAddress() string {
-	conn, err := net.Dial("udp", "8.8.8.8:53")
+	conn, err := net.DialTimeout("udp", "8.8.8.8:53", 100*time.Millisecond)
 	if err != nil {
 		addrs, err := net.InterfaceAddrs()
 		if err == nil {
@@ -659,7 +882,10 @@ func getIPAddress() string {
 		return "127.0.0.1"
 	}
 	defer conn.Close()
-	return conn.LocalAddr().(*net.UDPAddr).IP.String()
+	if udpAddr, ok := conn.LocalAddr().(*net.UDPAddr); ok {
+		return udpAddr.IP.String()
+	}
+	return "127.0.0.1"
 }
 
 func getLinuxResolution() string {
@@ -710,15 +936,39 @@ func getLinuxResolution() string {
 func getResolution() string {
 	switch runtime.GOOS {
 	case "windows":
-		output := runShellCommand("(Get-CimInstance Win32_VideoController).CurrentHorizontalResolution,(Get-CimInstance Win32_VideoController).CurrentVerticalResolution -join 'x'")
+		out := runCommand("wmic", "path", "Win32_VideoController", "get", "CurrentHorizontalResolution,CurrentVerticalResolution")
+		if out != "" {
+			lines := strings.Split(out, "\n")
+			for _, l := range lines {
+				f := strings.Fields(l)
+				if len(f) == 2 && f[0] != "CurrentHorizontalResolution" {
+					return fmt.Sprintf("%sx%s", f[0], f[1])
+				}
+			}
+		}
+		output := runCommand("powershell", "-NoProfile", "-NonInteractive", "-Command", "(Get-CimInstance Win32_VideoController).CurrentHorizontalResolution,(Get-CimInstance Win32_VideoController).CurrentVerticalResolution -join 'x'")
 		if output != "" {
-			return output
+			return strings.TrimSpace(output)
 		}
 	case "linux":
 		return getLinuxResolution()
 	case "darwin":
-		output := runShellCommand("system_profiler SPDisplaysDataType | grep Resolution | awk '{print $2\"x\"$4}'")
-		return strings.TrimSpace(output)
+		out := runCommand("system_profiler", "SPDisplaysDataType")
+		if out != "" {
+			lines := strings.Split(out, "\n")
+			for _, l := range lines {
+				if strings.Contains(l, "Resolution:") {
+					parts := strings.SplitN(l, ":", 2)
+					if len(parts) == 2 {
+						fields := strings.Fields(parts[1])
+						if len(fields) >= 3 {
+							return fmt.Sprintf("%s x %s", fields[0], fields[2])
+						}
+						return strings.TrimSpace(parts[1])
+					}
+				}
+			}
+		}
 	}
 	return "Unknown"
 }
@@ -892,7 +1142,8 @@ func getLinuxWM() string {
 }
 
 func getWindowManager() string {
-	if runtime.GOOS == "linux" {
+	switch runtime.GOOS {
+	case "linux", "freebsd", "openbsd", "netbsd":
 		if os.Getenv("WAYLAND_DISPLAY") != "" {
 			session := os.Getenv("XDG_SESSION_TYPE")
 			if session == "wayland" {
@@ -906,14 +1157,16 @@ func getWindowManager() string {
 					return "Sway"
 				case "wlroots":
 					return "wlroots based"
+				case "hyprland":
+					return "Hyprland"
 				}
 				return "Wayland"
 			}
 		}
 		return getLinuxWM()
-	} else if runtime.GOOS == "windows" {
+	case "windows":
 		return "DWM"
-	} else if runtime.GOOS == "darwin" {
+	case "darwin":
 		return "Quartz Compositor"
 	}
 	return "Unknown"
@@ -928,12 +1181,21 @@ func getSystemLocale() string {
 		return strings.Split(locale, ".")[0]
 	}
 	if runtime.GOOS == "windows" {
-		return runShellCommand("(Get-Culture).Name")
+		if loc := getWindowsRegValue(`HKCU\Control Panel\International`, "LocaleName"); loc != "" {
+			return loc
+		}
+		return runCommand("powershell", "-NoProfile", "-NonInteractive", "-Command", "(Get-Culture).Name")
 	}
 	return "Unknown"
 }
 
 func getDesktopEnvironment() string {
+	if runtime.GOOS == "windows" {
+		return "Explorer"
+	}
+	if runtime.GOOS == "darwin" {
+		return "Aqua"
+	}
 	de := os.Getenv("XDG_CURRENT_DESKTOP")
 	if de == "" {
 		de = os.Getenv("DESKTOP_SESSION")
@@ -943,7 +1205,232 @@ func getDesktopEnvironment() string {
 	return strings.Title(de)
 }
 
-func getPackageCounts() string {
+func readSQLiteVarint(b []byte) (uint64, int) {
+	var val uint64
+	for i := 0; i < 9 && i < len(b); i++ {
+		byteVal := b[i]
+		if i == 8 {
+			val = (val << 8) | uint64(byteVal)
+			return val, 9
+		}
+		val = (val << 7) | uint64(byteVal&0x7f)
+		if byteVal&0x80 == 0 {
+			return val, i + 1
+		}
+	}
+	return val, len(b)
+}
+
+func countSQLitePageRows(f *os.File, pageNum int, pageSize int) int {
+	if pageNum <= 0 {
+		return 0
+	}
+	offset := int64(pageNum-1) * int64(pageSize)
+	buf := make([]byte, pageSize)
+	if _, err := f.ReadAt(buf, offset); err != nil {
+		return 0
+	}
+
+	hdrOffset := 0
+	if pageNum == 1 {
+		hdrOffset = 100
+	}
+	if hdrOffset+8 > len(buf) {
+		return 0
+	}
+
+	pageType := buf[hdrOffset]
+	numCells := int(binary.BigEndian.Uint16(buf[hdrOffset+3 : hdrOffset+5]))
+
+	switch pageType {
+	case 0x0D: // Table leaf
+		return numCells
+	case 0x05: // Table interior
+		total := 0
+		if hdrOffset+12 > len(buf) {
+			return 0
+		}
+		rightChild := int(binary.BigEndian.Uint32(buf[hdrOffset+8 : hdrOffset+12]))
+		cellPtrsOffset := hdrOffset + 12
+		for i := 0; i < numCells; i++ {
+			pOffset := cellPtrsOffset + i*2
+			if pOffset+2 > len(buf) {
+				break
+			}
+			cellPtr := int(binary.BigEndian.Uint16(buf[pOffset : pOffset+2]))
+			if cellPtr+4 <= len(buf) {
+				leftChild := int(binary.BigEndian.Uint32(buf[cellPtr : cellPtr+4]))
+				total += countSQLitePageRows(f, leftChild, pageSize)
+			}
+		}
+		total += countSQLitePageRows(f, rightChild, pageSize)
+		return total
+	}
+	return 0
+}
+
+func scanSQLiteSchemaPage(f *os.File, pageNum int, pageSize int, targetTable string) int {
+	if pageNum <= 0 {
+		return 0
+	}
+	offset := int64(pageNum-1) * int64(pageSize)
+	buf := make([]byte, pageSize)
+	if _, err := f.ReadAt(buf, offset); err != nil {
+		return 0
+	}
+
+	hdrOffset := 0
+	if pageNum == 1 {
+		hdrOffset = 100
+	}
+	if hdrOffset+8 > len(buf) {
+		return 0
+	}
+
+	pageType := buf[hdrOffset]
+	numCells := int(binary.BigEndian.Uint16(buf[hdrOffset+3 : hdrOffset+5]))
+
+	if pageType == 0x05 { // Interior table
+		rightChild := int(binary.BigEndian.Uint32(buf[hdrOffset+8 : hdrOffset+12]))
+		cellPtrsOffset := hdrOffset + 12
+		for i := 0; i < numCells; i++ {
+			pOffset := cellPtrsOffset + i*2
+			if pOffset+2 > len(buf) {
+				break
+			}
+			cellPtr := int(binary.BigEndian.Uint16(buf[pOffset : pOffset+2]))
+			if cellPtr+4 <= len(buf) {
+				leftChild := int(binary.BigEndian.Uint32(buf[cellPtr : cellPtr+4]))
+				if res := scanSQLiteSchemaPage(f, leftChild, pageSize, targetTable); res > 0 {
+					return res
+				}
+			}
+		}
+		return scanSQLiteSchemaPage(f, rightChild, pageSize, targetTable)
+	}
+
+	if pageType == 0x0D { // Leaf table
+		cellPtrsOffset := hdrOffset + 8
+		for i := 0; i < numCells; i++ {
+			pOffset := cellPtrsOffset + i*2
+			if pOffset+2 > len(buf) {
+				break
+			}
+			cellPtr := int(binary.BigEndian.Uint16(buf[pOffset : pOffset+2]))
+			if cellPtr >= len(buf) {
+				continue
+			}
+			cellData := buf[cellPtr:]
+			if !bytes.Contains(cellData, []byte(targetTable)) {
+				continue
+			}
+
+			payloadLen, n1 := readSQLiteVarint(cellData)
+			if int(payloadLen) > len(cellData)-n1 {
+				payloadLen = uint64(len(cellData) - n1)
+			}
+			_, n2 := readSQLiteVarint(cellData[n1:])
+			recordOffset := n1 + n2
+			if recordOffset >= len(cellData) {
+				continue
+			}
+
+			record := cellData[recordOffset : recordOffset+int(payloadLen)-n2]
+			hdrLen, n3 := readSQLiteVarint(record)
+			if int(hdrLen) > len(record) {
+				continue
+			}
+			recHdr := record[n3:hdrLen]
+
+			var serialTypes []uint64
+			for len(recHdr) > 0 {
+				st, n := readSQLiteVarint(recHdr)
+				serialTypes = append(serialTypes, st)
+				recHdr = recHdr[n:]
+			}
+
+			if len(serialTypes) >= 4 {
+				bodyOffset := int(hdrLen)
+				currBody := record[bodyOffset:]
+				var cols [][]byte
+				for _, st := range serialTypes {
+					var colLen int
+					if st >= 12 && st%2 == 0 {
+						colLen = int((st - 12) / 2)
+					} else if st >= 13 && st%2 == 1 {
+						colLen = int((st - 13) / 2)
+					} else if st == 1 {
+						colLen = 1
+					} else if st == 2 {
+						colLen = 2
+					} else if st == 3 {
+						colLen = 3
+					} else if st == 4 {
+						colLen = 4
+					} else if st == 5 {
+						colLen = 6
+					} else if st == 6 || st == 7 {
+						colLen = 8
+					}
+					if colLen > len(currBody) {
+						break
+					}
+					cols = append(cols, currBody[:colLen])
+					currBody = currBody[colLen:]
+				}
+
+				if len(cols) >= 4 {
+					colType := string(cols[0])
+					colName := string(cols[1])
+					if (colType == "table" || colType == "index") && colName == targetTable {
+						rootBytes := cols[3]
+						var rootPage int
+						for _, b := range rootBytes {
+							rootPage = (rootPage << 8) | int(b)
+						}
+						return rootPage
+					}
+				}
+			}
+		}
+	}
+	return 0
+}
+
+func countRPMFromSQLite(dbPath string) int {
+	f, err := os.Open(dbPath)
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+
+	header := make([]byte, 100)
+	if _, err := io.ReadFull(f, header); err != nil {
+		return 0
+	}
+	if string(header[:16]) != "SQLite format 3\x00" {
+		return 0
+	}
+
+	pageSize := int(binary.BigEndian.Uint16(header[16:18]))
+	if pageSize == 1 {
+		pageSize = 65536
+	}
+
+	// Try Name table first (much faster as leaf cells are small)
+	rootPage := scanSQLiteSchemaPage(f, 1, pageSize, "Name")
+	if rootPage == 0 {
+		rootPage = scanSQLiteSchemaPage(f, 1, pageSize, "Packages")
+	}
+	if rootPage == 0 {
+		return 0
+	}
+
+	return countSQLitePageRows(f, rootPage, pageSize)
+}
+
+// GetPackageCounts fetches package counts across all supported package managers. (Exported)
+func GetPackageCounts() string {
 	var results []string
 	var wg sync.WaitGroup
 	var mu sync.Mutex
@@ -967,17 +1454,97 @@ func getPackageCounts() string {
 			}
 			return count
 		}},
-		{"APT", func() int {
-			file, err := os.Open("/var/lib/dpkg/status")
+		{"Dpkg", func() int {
+			data, err := os.ReadFile("/var/lib/dpkg/status")
 			if err != nil {
 				return 0
 			}
-			defer file.Close()
+			count := bytes.Count(data, []byte("\nPackage: "))
+			if bytes.HasPrefix(data, []byte("Package: ")) {
+				count++
+			}
+			return count
+		}},
+		{"RPM", func() int {
+			// Fast path 1: Direct SQLite B-tree header counting (< 1ms)
+			rpmDBPaths := []string{
+				"/var/lib/rpm/rpmdb.sqlite",
+				"/usr/lib/sysimage/rpm/rpmdb.sqlite",
+				"/var/lib/rpm/Packages.db",
+				"/usr/lib/sysimage/rpm/Packages.db",
+			}
+			for _, p := range rpmDBPaths {
+				if count := countRPMFromSQLite(p); count > 0 {
+					return count
+				}
+			}
+
+			// Fast path 2: Non-verifying rpm query with tight timeout
+			if _, err := exec.LookPath("rpm"); err == nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 350*time.Millisecond)
+				defer cancel()
+				cmd := exec.CommandContext(ctx, "rpm", "-qa", "--nodigest", "--nosignature", "--qf", ".\n")
+				if out, err := cmd.Output(); err == nil {
+					count := bytes.Count(out, []byte("\n"))
+					if count > 0 {
+						return count
+					}
+				}
+			}
+			return 0
+		}},
+		{"APK", func() int {
+			data, err := os.ReadFile("/lib/apk/db/installed")
+			if err != nil {
+				return 0
+			}
+			count := bytes.Count(data, []byte("\nP:"))
+			if bytes.HasPrefix(data, []byte("P:")) {
+				count++
+			}
+			return count
+		}},
+		{"XBPS", func() int {
+			dirs, err := os.ReadDir("/var/db/xbps")
+			if err != nil {
+				return 0
+			}
 			count := 0
-			scanner := bufio.NewScanner(file)
-			for scanner.Scan() {
-				if strings.HasPrefix(scanner.Text(), "Package: ") {
+			for _, d := range dirs {
+				if strings.HasPrefix(d.Name(), "pkg-") || strings.HasSuffix(d.Name(), ".plist") {
 					count++
+				}
+			}
+			return count
+		}},
+		{"Portage", func() int {
+			cats, err := os.ReadDir("/var/db/pkg")
+			if err != nil {
+				return 0
+			}
+			count := 0
+			for _, cat := range cats {
+				if cat.IsDir() && !strings.HasPrefix(cat.Name(), ".") {
+					if pkgs, err := os.ReadDir("/var/db/pkg/" + cat.Name()); err == nil {
+						for _, p := range pkgs {
+							if p.IsDir() && !strings.HasPrefix(p.Name(), ".") {
+								count++
+							}
+						}
+					}
+				}
+			}
+			return count
+		}},
+		{"Nix", func() int {
+			count := 0
+			for _, p := range []string{"/nix/var/nix/profiles/default", "/nix/var/nix/profiles/system"} {
+				if dirs, err := os.ReadDir(p); err == nil {
+					for _, d := range dirs {
+						if !strings.HasPrefix(d.Name(), ".") {
+							count++
+						}
+					}
 				}
 			}
 			return count
@@ -1038,19 +1605,85 @@ func getPackageCounts() string {
 			}
 			return count
 		}},
-		{"RPM", func() int {
-			if _, err := exec.LookPath("rpm"); err != nil {
+		{"MacPorts", func() int {
+			count := 0
+			if dirs, err := os.ReadDir("/opt/local/var/macports/software"); err == nil {
+				for _, d := range dirs {
+					if d.IsDir() && !strings.HasPrefix(d.Name(), ".") {
+						count++
+					}
+				}
+			}
+			return count
+		}},
+		{"Scoop", func() int {
+			count := 0
+			home := os.Getenv("USERPROFILE")
+			if home == "" {
+				home = os.Getenv("HOME")
+			}
+			if home != "" {
+				if dirs, err := os.ReadDir(home + "/scoop/apps"); err == nil {
+					for _, d := range dirs {
+						if d.IsDir() && !strings.HasPrefix(d.Name(), ".") && d.Name() != "scoop" {
+							count++
+						}
+					}
+				}
+			}
+			return count
+		}},
+		{"Chocolatey", func() int {
+			count := 0
+			chocoPaths := []string{
+				os.Getenv("ChocolateyInstall") + "/lib",
+				"C:/ProgramData/chocolatey/lib",
+			}
+			for _, p := range chocoPaths {
+				if p == "/lib" || p == "" {
+					continue
+				}
+				if dirs, err := os.ReadDir(p); err == nil {
+					for _, d := range dirs {
+						if d.IsDir() && !strings.HasPrefix(d.Name(), ".") && !strings.EqualFold(d.Name(), "chocolatey") {
+							count++
+						}
+					}
+					if count > 0 {
+						break
+					}
+				}
+			}
+			return count
+		}},
+		{"Winget", func() int {
+			count := 0
+			localAppData := os.Getenv("LOCALAPPDATA")
+			if localAppData != "" {
+				if dirs, err := os.ReadDir(localAppData + "/Microsoft/WinGet/Packages"); err == nil {
+					for _, d := range dirs {
+						if d.IsDir() && !strings.HasPrefix(d.Name(), ".") {
+							count++
+						}
+					}
+				}
+			}
+			return count
+		}},
+		{"BSD Pkg", func() int {
+			if runtime.GOOS != "freebsd" && runtime.GOOS != "openbsd" && runtime.GOOS != "netbsd" {
 				return 0
 			}
-			cmd := exec.Command("rpm", "-qa")
-			out, err := cmd.Output()
+			if count := countRPMFromSQLite("/var/db/pkg/local.sqlite"); count > 0 {
+				return count
+			}
+			dirs, err := os.ReadDir("/var/db/pkg")
 			if err != nil {
 				return 0
 			}
-			lines := strings.Split(string(out), "\n")
 			count := 0
-			for _, line := range lines {
-				if strings.TrimSpace(line) != "" {
+			for _, d := range dirs {
+				if d.IsDir() && !strings.HasPrefix(d.Name(), ".") {
 					count++
 				}
 			}
@@ -1077,6 +1710,10 @@ func getPackageCounts() string {
 		return "None detected"
 	}
 	return strings.Join(results, ", ")
+}
+
+func getPackageCounts() string {
+	return GetPackageCounts()
 }
 
 func getDisk() string {
@@ -1135,16 +1772,30 @@ func getPrimaryMACAddress() string {
 
 func getPublicIPInfo() (ip, isp, city, country string, err error) {
 	client := http.Client{
-		Timeout: 400 * time.Millisecond,
+		Timeout: 500 * time.Millisecond,
+		Transport: &http.Transport{
+			DisableKeepAlives: true,
+		},
 	}
-	resp, err := client.Get("http://ip-api.com/json/")
+	resp, err := client.Get("https://ip-api.com/json/")
 	if err != nil {
+		resp2, err2 := client.Get("https://api.ipify.org?format=json")
+		if err2 != nil {
+			return "", "", "", "", fmt.Errorf("failed to reach ip lookup service: %w", err)
+		}
+		defer resp2.Body.Close()
+		var ipifyResp struct {
+			IP string `json:"ip"`
+		}
+		if err3 := json.NewDecoder(io.LimitReader(resp2.Body, 16*1024)).Decode(&ipifyResp); err3 == nil && ipifyResp.IP != "" {
+			return ipifyResp.IP, "N/A", "N/A", "N/A", nil
+		}
 		return "", "", "", "", fmt.Errorf("failed to reach ip-api: %w", err)
 	}
 	defer resp.Body.Close()
 
 	var apiResp ipAPIResponse
-	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(&apiResp); err != nil {
 		return "", "", "", "", fmt.Errorf("failed to parse ip-api response: %w", err)
 	}
 
@@ -1196,13 +1847,19 @@ func getDNSServers() []string {
 }
 
 func getSystemPingTime(host string) string {
+	if !reValidHost.MatchString(host) {
+		return "Failed"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+	defer cancel()
+
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
-		cmd = exec.Command("ping", "-n", "1", "-w", "400", host)
+		cmd = exec.CommandContext(ctx, "ping", "-n", "1", "-w", "400", host)
 	} else if runtime.GOOS == "darwin" {
-		cmd = exec.Command("ping", "-c", "1", "-t", "1", host)
+		cmd = exec.CommandContext(ctx, "ping", "-c", "1", "-t", "1", host)
 	} else {
-		cmd = exec.Command("ping", "-c", "1", "-W", "1", host)
+		cmd = exec.CommandContext(ctx, "ping", "-c", "1", "-W", "1", host)
 	}
 	out, err := cmd.Output()
 	if err != nil {
@@ -1267,10 +1924,6 @@ func getIOCounters() string {
 
 // GetSystemInfo is the main exported function to collect system data.
 func GetSystemInfo(isFast bool) *SystemInfo {
-	if MockDistro != "" {
-		return GetMockSystemInfo(MockDistro)
-	}
-
 	info := &SystemInfo{}
 	var wg sync.WaitGroup
 
@@ -1349,10 +2002,6 @@ func GetSystemInfo(isFast bool) *SystemInfo {
 
 // GetProcessList fetches information about running processes. (Exported)
 func GetProcessList() ([]ProcessInfo, error) {
-	if MockDistro != "" {
-		return GetMockProcessList(), nil
-	}
-
 	allProcs, err := process.Processes()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get processes: %w", err)
@@ -1454,10 +2103,6 @@ func GetProcessList() ([]ProcessInfo, error) {
 
 // GetNetworkDetails fetches all network-related info (Exported)
 func GetNetworkDetails() (*NetworkInfo, error) {
-	if MockDistro != "" {
-		return GetMockNetworkDetails(), nil
-	}
-
 	info := &NetworkInfo{}
 	var wg sync.WaitGroup
 	var errPublicIP error
@@ -1580,10 +2225,6 @@ func NewLiveTracker() *LiveTracker {
 
 // GetMetrics returns the calculated live metrics (Exported)
 func (lt *LiveTracker) GetMetrics() (*LiveMetrics, error) {
-	if MockDistro != "" {
-		return GetMockLiveMetrics(MockDistro), nil
-	}
-
 	lt.mu.Lock()
 	defer lt.mu.Unlock()
 
@@ -2148,10 +2789,6 @@ type GPUDetails struct {
 
 // GetGPUDetails collects detailed GPU and graphics API information
 func GetGPUDetails() *GPUDetails {
-	if MockDistro != "" {
-		return GetMockGPUDetails(MockDistro)
-	}
-
 	details := &GPUDetails{
 		Name:        "Unknown GPU",
 		Vendor:      "Unknown",
@@ -2308,20 +2945,18 @@ func GetGPUDetails() *GPUDetails {
 }
 
 func getOpenGLVersion() string {
-	cmd := exec.Command("glxinfo")
-	out, err := cmd.Output()
-	if err == nil {
-		lines := strings.Split(string(out), "\n")
+	out := runCommand("glxinfo")
+	if out != "" {
+		lines := strings.Split(out, "\n")
 		for _, line := range lines {
 			if strings.Contains(line, "OpenGL version string:") {
 				return strings.TrimSpace(strings.TrimPrefix(line, "OpenGL version string:"))
 			}
 		}
 	}
-	cmd = exec.Command("eglinfo")
-	out, err = cmd.Output()
-	if err == nil {
-		lines := strings.Split(string(out), "\n")
+	out = runCommand("eglinfo")
+	if out != "" {
+		lines := strings.Split(out, "\n")
 		for _, line := range lines {
 			if strings.Contains(line, "EGL version string:") {
 				return strings.TrimSpace(strings.TrimPrefix(line, "EGL version string:"))
@@ -2332,20 +2967,18 @@ func getOpenGLVersion() string {
 }
 
 func getVulkanVersion() string {
-	cmd := exec.Command("vulkaninfo", "--summary")
-	out, err := cmd.Output()
-	if err == nil {
-		lines := strings.Split(string(out), "\n")
+	out := runCommand("vulkaninfo", "--summary")
+	if out != "" {
+		lines := strings.Split(out, "\n")
 		for _, line := range lines {
 			if strings.Contains(line, "Vulkan Instance Version:") {
 				return strings.TrimSpace(strings.TrimPrefix(line, "Vulkan Instance Version:"))
 			}
 		}
 	}
-	cmd = exec.Command("vulkaninfo")
-	out, err = cmd.Output()
-	if err == nil {
-		lines := strings.Split(string(out), "\n")
+	out = runCommand("vulkaninfo")
+	if out != "" {
+		lines := strings.Split(out, "\n")
 		for _, line := range lines {
 			if strings.Contains(line, "Vulkan Instance Version") {
 				parts := strings.Split(line, ":")
@@ -2359,10 +2992,9 @@ func getVulkanVersion() string {
 }
 
 func getOpenCLVersion() string {
-	cmd := exec.Command("clinfo")
-	out, err := cmd.Output()
-	if err == nil {
-		lines := strings.Split(string(out), "\n")
+	out := runCommand("clinfo")
+	if out != "" {
+		lines := strings.Split(out, "\n")
 		for _, line := range lines {
 			if strings.Contains(line, "Platform Version") {
 				parts := strings.Split(line, ":")
@@ -2376,10 +3008,9 @@ func getOpenCLVersion() string {
 }
 
 func getCUDAVersion() string {
-	cmd := exec.Command("nvcc", "--version")
-	out, err := cmd.Output()
-	if err == nil {
-		lines := strings.Split(string(out), "\n")
+	out := runCommand("nvcc", "--version")
+	if out != "" {
+		lines := strings.Split(out, "\n")
 		for _, line := range lines {
 			if strings.Contains(line, "release") {
 				idx := strings.Index(line, "release")
@@ -2387,10 +3018,9 @@ func getCUDAVersion() string {
 			}
 		}
 	}
-	cmd = exec.Command("nvidia-smi")
-	out, err = cmd.Output()
-	if err == nil {
-		lines := strings.Split(string(out), "\n")
+	out = runCommand("nvidia-smi")
+	if out != "" {
+		lines := strings.Split(out, "\n")
 		for _, line := range lines {
 			if strings.Contains(line, "CUDA Version:") {
 				idx := strings.Index(line, "CUDA Version:")
@@ -2403,269 +3033,3 @@ func getCUDAVersion() string {
 	return "Unknown"
 }
 
-// GetMockSystemInfo returns mock system specifications
-func GetMockSystemInfo(distro string) *SystemInfo {
-	info := &SystemInfo{
-		Hostname:      "mock-pc",
-		Uptime:        "2 hours, 15 mins",
-		Shell:         "zsh 5.9",
-		Resolution:    "1920x1080",
-		DE:            "GNOME",
-		WindowManager: "Mutter",
-		Terminal:      "Alacritty",
-		Locale:        "en_US.UTF-8",
-		Languages:     "Go, Rust, TypeScript",
-		OpenPorts:     "22, 80, 443, 3000",
-		Temperature:   "45.0 °C",
-		Go:            "go1.21.0",
-		Packages:      "Pacman (1200)",
-	}
-
-	switch distro {
-	case "arch":
-		info.OS = "Arch Linux x86_64"
-		info.Kernel = "Linux 6.10.1-arch1-1"
-		info.CPU = "AMD Ryzen 7 7800X3D @ 4.20 GHz"
-		info.CoresThreads = "8/16"
-		info.CPUSpeed = "4.20 GHz"
-		info.GPU = "Nvidia GeForce RTX 4090"
-		info.RAM = "8.5GB / 32.0GB (26%)"
-		info.Swap = "2.0GB / 8.0GB (25%)"
-		info.Disk = "150GB / 1000GB (15%)"
-		info.IPAddress = "192.168.1.100"
-	case "ubuntu":
-		info.OS = "Ubuntu 24.04 LTS"
-		info.Kernel = "Linux 6.8.0-31-generic"
-		info.CPU = "Intel(R) Core(TM) i7-1370P @ 2.20 GHz"
-		info.CoresThreads = "14/20"
-		info.CPUSpeed = "5.20 GHz"
-		info.GPU = "Intel Iris Xe Graphics"
-		info.RAM = "4.1GB / 16.0GB (25%)"
-		info.Swap = "1.0GB / 4.0GB (25%)"
-		info.Disk = "64GB / 512GB (12%)"
-		info.IPAddress = "192.168.1.105"
-		info.Packages = "Dpkg (1850), Snap (12)"
-		info.Shell = "bash 5.2"
-		info.Terminal = "GNOME Terminal"
-	case "macos":
-		info.OS = "macOS Sonoma 14.5"
-		info.Kernel = "Darwin 23.5.0"
-		info.CPU = "Apple M3 Max"
-		info.CoresThreads = "16/16"
-		info.CPUSpeed = "3.40 GHz"
-		info.GPU = "Apple M3 Max 30-Core GPU"
-		info.RAM = "12.3GB / 48.0GB (25%)"
-		info.Swap = "0.0GB / 0.0GB (0%)"
-		info.Disk = "256GB / 1000GB (25%)"
-		info.IPAddress = "10.0.0.15"
-		info.Packages = "Homebrew (120)"
-		info.Terminal = "Terminal.app"
-		info.DE = "Aqua"
-		info.WindowManager = "Quartz Compositor"
-	case "windows":
-		info.OS = "Microsoft Windows 11 Pro"
-		info.Kernel = "NT 10.0.22631"
-		info.CPU = "Intel(R) Core(TM) i9-14900HX @ 2.20 GHz"
-		info.CoresThreads = "24/32"
-		info.CPUSpeed = "5.80 GHz"
-		info.GPU = "Nvidia GeForce RTX 4080 Laptop GPU"
-		info.RAM = "14.2GB / 64.0GB (22%)"
-		info.Swap = "4.0GB / 16.0GB (25%)"
-		info.Disk = "450GB / 2000GB (22%)"
-		info.IPAddress = "192.168.1.20"
-		info.Packages = "Winget (45)"
-		info.Shell = "PowerShell 7.4.2"
-		info.Terminal = "Windows Terminal"
-		info.DE = "Explorer"
-		info.WindowManager = "DWM"
-	default:
-		info.OS = "Generic Linux"
-		info.Kernel = "Linux 6.1.0"
-		info.CPU = "Generic Processor"
-		info.CoresThreads = "4/8"
-		info.CPUSpeed = "3.00 GHz"
-		info.GPU = "Generic Graphics"
-		info.RAM = "2.0GB / 8.0GB (25%)"
-		info.Swap = "0.0GB / 0.0GB (0%)"
-		info.Disk = "20GB / 100GB (20%)"
-		info.IPAddress = "127.0.0.1"
-	}
-	return info
-}
-
-// GetMockGPUDetails returns mock GPU and API specifications
-func GetMockGPUDetails(distro string) *GPUDetails {
-	details := &GPUDetails{
-		Name:        "Generic GPU",
-		Vendor:      "Generic",
-		Driver:      "generic-driver",
-		VRAMUsed:    "512 MB",
-		VRAMTotal:   "2.0 GB",
-		VRAMFree:    "1.5 GB",
-		Temperature: "40.0 °C",
-		OpenGL:      "OpenGL 4.5",
-		Vulkan:      "Vulkan 1.2",
-		OpenCL:      "OpenCL 2.0",
-		CUDA:        "Unknown",
-	}
-
-	switch distro {
-	case "arch":
-		details.Name = "Nvidia GeForce RTX 4090"
-		details.Vendor = "Nvidia"
-		details.Driver = "Nvidia proprietary (555.58)"
-		details.VRAMUsed = "6.1 GB"
-		details.VRAMTotal = "24.0 GB"
-		details.VRAMFree = "17.9 GB"
-		details.Temperature = "52.0 °C"
-		details.OpenGL = "OpenGL 4.6 (Compatibility Profile) NVIDIA 555.58"
-		details.Vulkan = "Vulkan 1.3.277"
-		details.OpenCL = "OpenCL 3.0 CUDA"
-		details.CUDA = "release 12.5, V12.5.82"
-	case "ubuntu":
-		details.Name = "Intel Iris Xe Graphics"
-		details.Vendor = "Intel"
-		details.Driver = "i915"
-		details.VRAMUsed = "1.2 GB"
-		details.VRAMTotal = "8.0 GB"
-		details.VRAMFree = "6.8 GB"
-		details.Temperature = "46.0 °C"
-		details.OpenGL = "OpenGL 4.6 Mesa 24.0.5"
-		details.Vulkan = "Vulkan 1.3.274"
-		details.OpenCL = "OpenCL 3.0 Neo"
-	case "macos":
-		details.Name = "Apple M3 Max GPU"
-		details.Vendor = "Apple"
-		details.Driver = "Apple Metal Driver"
-		details.VRAMTotal = "48.0 GB"
-		details.Vulkan = "Metal (310.25)"
-	case "windows":
-		details.Name = "Nvidia GeForce RTX 4080 Laptop GPU"
-		details.Vendor = "Nvidia"
-		details.Driver = "Nvidia Game Ready (552.44)"
-		details.VRAMUsed = "3.2 GB"
-		details.VRAMTotal = "12.0 GB"
-		details.VRAMFree = "8.8 GB"
-		details.Temperature = "62.0 °C"
-		details.OpenGL = "OpenGL 4.6 NVIDIA 552.44"
-		details.Vulkan = "Vulkan 1.3.278"
-		details.OpenCL = "OpenCL 3.0 CUDA"
-		details.CUDA = "release 12.4"
-	}
-	return details
-}
-
-// GetMockProcessList returns a mock list of processes
-func GetMockProcessList() []ProcessInfo {
-	return []ProcessInfo{
-		{PID: 1042, Name: "kernelview", CPU: 0.8, RAM: 45 * 1024 * 1024},
-		{PID: 3012, Name: "firefox", CPU: 12.5, RAM: 820 * 1024 * 1024},
-		{PID: 4511, Name: "vscode", CPU: 4.2, RAM: 450 * 1024 * 1024},
-		{PID: 1205, Name: "discord", CPU: 2.1, RAM: 180 * 1024 * 1024},
-		{PID: 902, Name: "systemd", CPU: 0.1, RAM: 15 * 1024 * 1024},
-		{PID: 1512, Name: "kitty", CPU: 1.5, RAM: 60 * 1024 * 1024},
-		{PID: 2804, Name: "postgres", CPU: 0.3, RAM: 120 * 1024 * 1024},
-	}
-}
-
-// GetMockNetworkDetails returns mock network statistics
-func GetMockNetworkDetails() *NetworkInfo {
-	return &NetworkInfo{
-		Hostname:   "mock-pc",
-		PrivateIP:  "192.168.1.100",
-		MACAddress: "00:11:22:33:44:55",
-		PublicIP:   "203.0.113.50",
-		ISP:        "Mock Telecom",
-		City:       "New York",
-		Country:    "United States",
-		DNSServers: []string{"1.1.1.1", "8.8.8.8"},
-		Ping:       "14.5 ms",
-		IOCounters: "Rx: 45.0 GB / Tx: 5.0 GB",
-	}
-}
-
-// GetMockLiveMetrics returns real-time live TUI metrics for the mock distro
-func GetMockLiveMetrics(distro string) *LiveMetrics {
-	sysInfo := GetMockSystemInfo(distro)
-
-	var numCores int
-	switch distro {
-	case "arch":
-		numCores = 16
-	case "ubuntu":
-		numCores = 20
-	case "macos":
-		numCores = 16
-	case "windows":
-		numCores = 32
-	default:
-		numCores = 8
-	}
-
-	cpuCores := make([]float64, numCores)
-	for i := range cpuCores {
-		cpuCores[i] = 5.0 + float64(time.Now().UnixNano()%40)
-	}
-
-	var usedMem, totalMem uint64
-	switch distro {
-	case "arch":
-		usedMem = 8500 * 1024 * 1024
-		totalMem = 32000 * 1024 * 1024
-	case "ubuntu":
-		usedMem = 4100 * 1024 * 1024
-		totalMem = 16000 * 1024 * 1024
-	case "macos":
-		usedMem = 12300 * 1024 * 1024
-		totalMem = 48000 * 1024 * 1024
-	case "windows":
-		usedMem = 14200 * 1024 * 1024
-		totalMem = 64000 * 1024 * 1024
-	default:
-		usedMem = 2000 * 1024 * 1024
-		totalMem = 8000 * 1024 * 1024
-	}
-
-	var temp float64
-	fmt.Sscanf(sysInfo.Temperature, "%f", &temp)
-
-	gpuDetails := GetMockGPUDetails(distro)
-	var gpuTemp float64
-	fmt.Sscanf(gpuDetails.Temperature, "%f", &gpuTemp)
-
-	var gpuMemUsed, gpuMemTotal uint64
-	fmt.Sscanf(gpuDetails.VRAMUsed, "%d", &gpuMemUsed)
-	fmt.Sscanf(gpuDetails.VRAMTotal, "%d", &gpuMemTotal)
-
-	gpuMetrics := LiveGPUMetrics{
-		HasGPU:      gpuDetails.Vendor != "Unknown" && gpuDetails.Vendor != "Generic",
-		GPUUsage:    10.0 + float64(time.Now().UnixNano()%30),
-		GPUMemUsage: 25.0 + float64(time.Now().UnixNano()%10),
-		GPUMemUsed:  gpuMemUsed,
-		GPUMemTotal: gpuMemTotal,
-		GPUTemp:     gpuTemp,
-	}
-
-	return &LiveMetrics{
-		Uptime:      sysInfo.Uptime,
-		CPUUsage:    20.0 + float64(time.Now().UnixNano()%15),
-		CPUCores:    cpuCores,
-		RAMUsed:     usedMem,
-		RAMTotal:    totalMem,
-		RAMPercent:  (float64(usedMem) / float64(totalMem)) * 100.0,
-		SwapUsed:    1000 * 1024 * 1024,
-		SwapTotal:   4000 * 1024 * 1024,
-		SwapPercent: 25.0,
-		DiskUsed:    150000 * 1024 * 1024,
-		DiskTotal:   1000000 * 1024 * 1024,
-		DiskPercent: 15.0,
-		Temperature: temp,
-		NetIface:    "eth0",
-		NetRxSpeed:  12500000,
-		NetTxSpeed:  1500000,
-		NetRxTotal:  45000000000,
-		NetTxTotal:  5000000000,
-		Processes:   GetMockProcessList(),
-		GPUMetrics:  gpuMetrics,
-	}
-}

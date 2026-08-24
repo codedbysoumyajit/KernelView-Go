@@ -6,14 +6,13 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"strings"
 
 	"KernelView-Go/display"
 	"KernelView-Go/gather"
 )
 
 // version is set at build time
-var version = "v1.2.0"
+var version = "v1.3.0"
 
 // handleJSONOutput handles all --json flag requests
 func handleJSONOutput(processFlag, networkFlag, gpuFlag, fastFlag bool) {
@@ -77,10 +76,6 @@ func main() {
 	var noColorFlag bool
 	flag.BoolVar(&noColorFlag, "no-color", false, "Disable all color and formatting.")
 
-	var mockFlag string
-	flag.StringVar(&mockFlag, "mock", "", "Mock a system setup for testing (arch, ubuntu, macos, windows).")
-	flag.StringVar(&mockFlag, "m", "", "Mock a system setup for testing (shorthand).")
-
 	// Custom usage message
 	flag.Usage = func() {
 		earlyNoColor := false
@@ -97,12 +92,6 @@ func main() {
 	}
 
 	flag.Parse()
-
-	// Handle mock environment override
-	if mockFlag != "" {
-		display.MockDistro = strings.ToLower(mockFlag)
-		gather.MockDistro = strings.ToLower(mockFlag)
-	}
 
 	// --- Handle Priority Flags ---
 

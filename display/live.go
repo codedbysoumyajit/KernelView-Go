@@ -18,11 +18,13 @@ type EventType int
 const (
 	Tick EventType = iota
 	Key
+	PackageUpdate
 )
 
 type Event struct {
 	Type EventType
 	Char byte
+	Str  string
 }
 
 type LiveDisplay struct {
@@ -81,17 +83,17 @@ func StartLiveDashboard(isFast bool) {
 		os.Exit(0)
 	}()
 
-	events := make(chan Event)
+	events := make(chan Event, 32)
 	tracker := gather.NewLiveTracker()
 	staticInfo := gather.GetSystemInfo(true)
 	staticInfo.Packages = "Loading..."
 
-	// Background package count resolver
+	// Background package count resolver (completely thread-safe via event loop)
 	go func() {
 		defer func() { _ = recover() }()
-		fullInfo := gather.GetSystemInfo(false)
-		if fullInfo != nil && fullInfo.Packages != "" && fullInfo.Packages != "N/A" {
-			staticInfo.Packages = fullInfo.Packages
+		pkgs := gather.GetPackageCounts()
+		if pkgs != "" && pkgs != "N/A" {
+			events <- Event{Type: PackageUpdate, Str: pkgs}
 		}
 	}()
 
@@ -129,10 +131,11 @@ func StartLiveDashboard(isFast bool) {
 	ld.render()
 
 	for ev := range events {
-		if ev.Type == Key {
+		switch ev.Type {
+		case Key:
 			char := ev.Char
 			if char == 'q' || char == 'Q' || char == 3 { // 3 = Ctrl+C
-				break
+				return
 			}
 			switch char {
 			case '1', 'd', 'D':
@@ -148,6 +151,8 @@ func StartLiveDashboard(isFast bool) {
 				ld.tab = "cores"
 				fmt.Print("\033[H\033[2J")
 			}
+		case PackageUpdate:
+			ld.static.Packages = ev.Str
 		}
 
 		ld.updateSize()
