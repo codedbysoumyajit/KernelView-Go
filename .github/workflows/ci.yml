@@ -29,13 +29,14 @@ jobs:
       - name: Go Vet
         run: go vet ./...
 
-      - name: Build Binary
-        run: go build -v -o kernelview .
-
-      - name: Test Execution (Unix)
+      - name: Build & Test (Unix)
         if: matrix.os != 'windows-latest'
-        run: ./kernelview --version
+        run: |
+          go build -v -o kernelview .
+          ./kernelview --version
 
-      - name: Test Execution (Windows)
+      - name: Build & Test (Windows)
         if: matrix.os == 'windows-latest'
-        run: .\kernelview.exe --version
+        run: |
+          go build -v -o kernelview.exe .
+          .\kernelview.exe --version
