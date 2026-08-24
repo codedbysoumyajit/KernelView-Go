@@ -30,8 +30,12 @@ jobs:
         run: go vet ./...
 
       - name: Build Binary
-        run: go build -v ./...
+        run: go build -v -o kernelview .
 
-      - name: Test Execution
+      - name: Test Execution (Unix)
         if: matrix.os != 'windows-latest'
         run: ./kernelview --version
+
+      - name: Test Execution (Windows)
+        if: matrix.os == 'windows-latest'
+        run: .\kernelview.exe --version
