@@ -8,7 +8,6 @@ import (
 	"strings"
 	"syscall"
 	"time"
-	"unicode/utf8"
 
 	"KernelView-Go/gather"
 	"golang.org/x/term"
@@ -33,8 +32,11 @@ type LiveDisplay struct {
 	tab        string
 	termWidth  int
 	termHeight int
+	peakRx     float64
+	peakTx     float64
 }
 
+// StartLiveDashboard launches the clean, aesthetic live dashboard
 func StartLiveDashboard(isFast bool) {
 	fd := int(os.Stdin.Fd())
 	var oldState *term.State
@@ -47,7 +49,7 @@ func StartLiveDashboard(isFast bool) {
 			if oldState != nil {
 				_ = term.Restore(fd, oldState)
 			}
-			fmt.Print("\033[?25h\033[?1049l\033[0m") // Show cursor, exit alt screen buffer, reset formatting
+			fmt.Print("\033[?25h\033[?1049l\033[0m") // Show cursor, exit alternate screen, reset
 		}
 	}
 	defer cleanup()
@@ -55,20 +57,20 @@ func StartLiveDashboard(isFast bool) {
 	defer func() {
 		if r := recover(); r != nil {
 			cleanup()
-			fmt.Printf("\r\nKernelView Live Dashboard encountered an error: %v\r\n", r)
+			fmt.Printf("\r\nKernelView encountered an error: %v\r\n", r)
 		}
 	}()
 
-	// Switch to alternate screen buffer, home the cursor, and hide it
-	fmt.Print("\033[?1049h\033[H\033[?25l")
+	// Alternate screen buffer, clear screen, home cursor, hide cursor
+	fmt.Print("\033[?1049h\033[2J\033[H\033[?25l")
 
-	// Set terminal raw mode
+	// Set raw mode
 	oldState, errRaw = term.MakeRaw(fd)
 	if errRaw != nil {
 		oldState = nil
 	}
 
-	// Trap OS interrupt signals to cleanly restore terminal
+	// Trap signals to cleanly restore terminal
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
 	defer signal.Stop(sigChan)
@@ -81,21 +83,19 @@ func StartLiveDashboard(isFast bool) {
 
 	events := make(chan Event)
 	tracker := gather.NewLiveTracker()
-	staticInfo := gather.GetSystemInfo(true) // Get basic static info quickly
+	staticInfo := gather.GetSystemInfo(true)
 	staticInfo.Packages = "Loading..."
 
-	// Background resolver for packages count and slow metrics
+	// Background package count resolver
 	go func() {
 		defer func() { _ = recover() }()
 		fullInfo := gather.GetSystemInfo(false)
-		if fullInfo != nil {
-			if fullInfo.Packages != "" && fullInfo.Packages != "N/A" {
-				staticInfo.Packages = fullInfo.Packages
-			}
+		if fullInfo != nil && fullInfo.Packages != "" && fullInfo.Packages != "N/A" {
+			staticInfo.Packages = fullInfo.Packages
 		}
 	}()
 
-	// Input reader goroutine
+	// Input reader
 	go func() {
 		defer func() { _ = recover() }()
 		var buf [1]byte
@@ -108,8 +108,8 @@ func StartLiveDashboard(isFast bool) {
 		}
 	}()
 
-	// Ticker goroutine for live updates
-	ticker := time.NewTicker(500 * time.Millisecond)
+	// Live ticker (350ms with anti-jitter damping)
+	ticker := time.NewTicker(350 * time.Millisecond)
 	defer ticker.Stop()
 	go func() {
 		defer func() { _ = recover() }()
@@ -125,7 +125,6 @@ func StartLiveDashboard(isFast bool) {
 		tab:     "dashboard",
 	}
 
-	// Trigger initial render
 	ld.updateSize()
 	ld.render()
 
@@ -138,7 +137,7 @@ func StartLiveDashboard(isFast bool) {
 			switch char {
 			case '1', 'd', 'D':
 				ld.tab = "dashboard"
-				fmt.Print("\033[H\033[2J") // Clear screen on tab switch
+				fmt.Print("\033[H\033[2J")
 			case '2', 'p', 'P':
 				ld.tab = "processes"
 				fmt.Print("\033[H\033[2J")
@@ -162,8 +161,7 @@ func (ld *LiveDisplay) updateSize() {
 		if w != ld.termWidth || h != ld.termHeight {
 			ld.termWidth = w
 			ld.termHeight = h
-			// Clear screen to avoid residue characters during resize
-			fmt.Print("\033[H\033[2J")
+			fmt.Print("\033[H\033[2J") // Clear on resize
 		}
 	} else {
 		if ld.termWidth == 0 {
@@ -174,8 +172,7 @@ func (ld *LiveDisplay) updateSize() {
 }
 
 func (ld *LiveDisplay) renderWarningScreen(theme Theme) {
-	fmt.Print("\033[H")
-
+	fmt.Print("\033[H\033[2J")
 	boxWidth := 46
 	if ld.termWidth < boxWidth {
 		boxWidth = ld.termWidth - 2
@@ -184,48 +181,39 @@ func (ld *LiveDisplay) renderWarningScreen(theme Theme) {
 		}
 	}
 
-	var lines []string
-	lines = append(lines, "")
-	lines = append(lines, "  ⚠️   Terminal Size Too Constrained")
-	lines = append(lines, "")
-	lines = append(lines, fmt.Sprintf("  Current Size: %d x %d", ld.termWidth, ld.termHeight))
-	lines = append(lines, "  Required Min: 50 x 15")
-	lines = append(lines, "")
-	lines = append(lines, "  Please resize your terminal window")
-	lines = append(lines, "  or zoom out to restore the dashboard.")
-	lines = append(lines, "")
-	lines = append(lines, "  Press [Q] to quit.")
-
-	paddingY := (ld.termHeight - len(lines) - 2) / 2
-	if paddingY < 0 {
-		paddingY = 0
+	lines := []string{
+		"",
+		"  ⚠️   Terminal Size Too Constrained",
+		"",
+		fmt.Sprintf("  Current Size: %d x %d", ld.termWidth, ld.termHeight),
+		"  Required Min: 60 x 15",
+		"",
+		"  Please enlarge your terminal window",
+		"  or decrease font zoom to restore dashboard.",
+		"",
+		"  Press [Q] to quit.",
 	}
 
-	for i := 0; i < paddingY; i++ {
-		fmt.Print("\r\n")
+	box := drawBox("Warning", lines, boxWidth, len(lines)+2, theme)
+	padY := (ld.termHeight - len(box)) / 2
+	for i := 0; i < padY; i++ {
+		fmt.Print("\033[K\r\n")
 	}
-
-	box := drawBox("Warning", lines, boxWidth, theme)
 	for _, l := range box {
-		paddingX := (ld.termWidth - boxWidth) / 2
-		if paddingX < 0 {
-			paddingX = 0
+		padX := (ld.termWidth - boxWidth) / 2
+		if padX < 0 {
+			padX = 0
 		}
-		fmt.Printf("%s%s\r\n", strings.Repeat(" ", paddingX), l)
+		fmt.Printf("%s%s\033[K\r\n", strings.Repeat(" ", padX), l)
 	}
-
-	totalHeightUsed := paddingY + len(box)
-	for i := totalHeightUsed; i < ld.termHeight; i++ {
-		fmt.Printf("%s\r\n", strings.Repeat(" ", ld.termWidth))
-	}
+	fmt.Print("\033[J")
 }
 
 func (ld *LiveDisplay) render() {
 	distroKey := getDistroKey()
 	theme := GetThemeForDistro(distroKey, false)
 
-	// If terminal size is too small, show warning screen
-	if ld.termWidth < 50 || ld.termHeight < 15 {
+	if ld.termWidth < 60 || ld.termHeight < 15 {
 		ld.renderWarningScreen(theme)
 		return
 	}
@@ -235,136 +223,164 @@ func (ld *LiveDisplay) render() {
 		return
 	}
 
-	// Move cursor to home (top-left) to avoid flickering
+	// Update peak network rates
+	if metrics.NetRxSpeed > ld.peakRx {
+		ld.peakRx = metrics.NetRxSpeed
+	}
+	if metrics.NetTxSpeed > ld.peakTx {
+		ld.peakTx = metrics.NetTxSpeed
+	}
+
+	// Move cursor to home (top-left) to redraw cleanly
 	fmt.Print("\033[H")
 
-	// Print dynamic tab header
-	ld.printHeader(theme)
+	headerLines := ld.printHeader(theme)
+	footerLines := 1
+	if ld.termHeight >= 26 {
+		footerLines = 2
+	}
+	availableHeight := ld.termHeight - headerLines - footerLines
+	if availableHeight < 10 {
+		availableHeight = 10
+	}
 
 	switch ld.tab {
 	case "processes":
-		ld.renderProcesses(metrics, theme)
+		ld.renderProcesses(metrics, theme, availableHeight)
 	case "network":
-		ld.renderNetwork(metrics, theme)
+		ld.renderNetwork(metrics, theme, availableHeight)
 	case "cores":
-		ld.renderCores(metrics, theme)
+		ld.renderCores(metrics, theme, availableHeight)
 	default:
-		ld.renderDashboard(metrics, theme)
+		ld.renderDashboard(metrics, theme, availableHeight)
 	}
 
-	// Clear all leftover lines from this cursor position to the bottom of the screen
 	fmt.Print("\033[J")
-
-	// Print footer
-	ld.printFooter(theme)
+	ld.printFooter(theme, footerLines == 2)
 }
 
-func (ld *LiveDisplay) printHeader(theme Theme) {
+// -------------------------------------------------------------
+// Header & Footer
+// -------------------------------------------------------------
+
+func (ld *LiveDisplay) printHeader(theme Theme) int {
 	w := ld.termWidth
-	if w < 40 {
-		w = 40
+
+	// 1. Top Brand Banner with Distro & Clock
+	nowStr := time.Now().Format("15:04:05")
+	brand := " ◈ KERNELVIEW LIVE ◈ "
+
+	var metaStr string
+	if w >= 85 {
+		metaStr = fmt.Sprintf(" %s │ %s │ %s ", ld.static.OS, ld.static.Kernel, nowStr)
+	} else if w >= 65 {
+		metaStr = fmt.Sprintf(" %s │ %s ", ld.static.OS, nowStr)
+	} else {
+		metaStr = fmt.Sprintf(" %s ", nowStr)
 	}
 
-	// Draw a beautiful, solid title bar at the top (inverse background of distro accent color)
-	title := "  KERNELVIEW LIVE MONITOR  "
-	spaces := w - len(title)
-	if spaces < 0 {
-		spaces = 0
+	brandLen := visualLen(brand)
+	metaLen := visualLen(metaStr)
+	fillLen := w - brandLen - metaLen
+	if fillLen < 0 {
+		metaStr = fmt.Sprintf(" %s ", nowStr)
+		metaLen = visualLen(metaStr)
+		fillLen = w - brandLen - metaLen
+		if fillLen < 0 {
+			metaStr = ""
+			fillLen = w - brandLen
+		}
 	}
-	fmt.Printf("%s%s%s%s%s\r\n", theme.Accent, "\033[1;7m", title, strings.Repeat(" ", spaces), theme.Reset)
-
-	// Draw tabs on the next line with elegant spacing and pill/inverse highlighting
-	tabD := "  1. DASHBOARD  "
-	tabP := "  2. PROCESSES  "
-	tabN := "  3. NETWORK    "
-	tabC := "  4. CPU CORES  "
-
-	if ld.tab == "dashboard" {
-		tabD = fmt.Sprintf("%s\033[1;7m%s\033[0m", theme.Accent, tabD)
-	} else {
-		tabD = fmt.Sprintf("\033[90m%s\033[0m", tabD)
-	}
-	if ld.tab == "processes" {
-		tabP = fmt.Sprintf("%s\033[1;7m%s\033[0m", theme.Accent, tabP)
-	} else {
-		tabP = fmt.Sprintf("\033[90m%s\033[0m", tabP)
-	}
-	if ld.tab == "network" {
-		tabN = fmt.Sprintf("%s\033[1;7m%s\033[0m", theme.Accent, tabN)
-	} else {
-		tabN = fmt.Sprintf("\033[90m%s\033[0m", tabN)
-	}
-	if ld.tab == "cores" {
-		tabC = fmt.Sprintf("%s\033[1;7m%s\033[0m", theme.Accent, tabC)
-	} else {
-		tabC = fmt.Sprintf("\033[90m%s\033[0m", tabC)
+	if fillLen < 0 {
+		fillLen = 0
 	}
 
-	if ld.termHeight < 20 {
-		fmt.Printf("  %s  %s  %s  %s\r\n", tabD, tabP, tabN, tabC)
+	topBanner := fmt.Sprintf("%s\033[1;7m%s\033[0m\033[38;5;238m%s\033[0m\033[38;5;244m%s\033[0m\033[K\r\n",
+		theme.Accent, brand, strings.Repeat("─", fillLen), metaStr)
+	fmt.Print(topBanner)
+
+	// 2. Navigation Tabs (Pill Buttons)
+	tabNames := []struct {
+		id   string
+		name string
+	}{
+		{"dashboard", "1. DASHBOARD"},
+		{"processes", "2. PROCESSES"},
+		{"network", "3. NETWORK"},
+		{"cores", "4. CPU CORES"},
+	}
+
+	var tabStrs []string
+	for _, t := range tabNames {
+		if ld.tab == t.id {
+			tabStrs = append(tabStrs, fmt.Sprintf("%s\033[1;7m  %s  \033[0m", theme.Accent, t.name))
+		} else {
+			tabStrs = append(tabStrs, fmt.Sprintf("\033[90m[ \033[37m%s\033[90m ]\033[0m", t.name))
+		}
+	}
+
+	tabsLine := "  " + strings.Join(tabStrs, "  ")
+	if ld.termHeight >= 28 {
+		fmt.Printf("\033[K\r\n%s\033[K\r\n\033[K\r\n", tabsLine)
+		return 4
+	} else if ld.termHeight >= 22 {
+		fmt.Printf("%s\033[K\r\n\033[K\r\n", tabsLine)
+		return 3
 	} else {
-		fmt.Printf("\r\n  %s  %s  %s  %s\r\n\r\n", tabD, tabP, tabN, tabC)
+		fmt.Printf("%s\033[K\r\n", tabsLine)
+		return 2
 	}
 }
 
-func (ld *LiveDisplay) printFooter(theme Theme) {
-	w := ld.termWidth
-
+func (ld *LiveDisplay) printFooter(theme Theme, withLeadingNewline bool) {
 	keyQ := fmt.Sprintf("%s\033[1;7m Q \033[0m", theme.Accent)
 	key1 := fmt.Sprintf("%s\033[1;7m 1 \033[0m", theme.Accent)
 	key2 := fmt.Sprintf("%s\033[1;7m 2 \033[0m", theme.Accent)
 	key3 := fmt.Sprintf("%s\033[1;7m 3 \033[0m", theme.Accent)
 	key4 := fmt.Sprintf("%s\033[1;7m 4 \033[0m", theme.Accent)
 
-	footerText := fmt.Sprintf(" %s Quit   %s Dashboard   %s Processes   %s Network   %s Cores", keyQ, key1, key2, key3, key4)
-	visualLen := utf8.RuneCountInString(stripAnsi(footerText))
+	leftPart := fmt.Sprintf(" %s Quit   %s Dashboard   %s Processes   %s Network   %s Cores", keyQ, key1, key2, key3, key4)
+	rightPart := "\033[90mRefresh: 350ms │ KernelView \033[0m"
 
-	if w > visualLen+2 {
-		padding := w - visualLen - 1
-		fmt.Printf("\r\n%s%s", footerText, strings.Repeat(" ", padding))
+	leftLen := visualLen(leftPart)
+	rightLen := visualLen(rightPart)
+	fillLen := ld.termWidth - leftLen - rightLen - 1
+	if fillLen < 1 {
+		fillLen = 1
+	}
+
+	footerText := fmt.Sprintf("%s%s%s", leftPart, strings.Repeat(" ", fillLen), rightPart)
+
+	if withLeadingNewline {
+		fmt.Printf("\033[K\r\n%s\033[K", footerText)
 	} else {
-		fmt.Printf("\r\n%s", footerText)
+		fmt.Printf("%s\033[K", footerText)
 	}
 }
 
-func (ld *LiveDisplay) renderDashboard(metrics *gather.LiveMetrics, theme Theme) {
-	// Box widths: split termWidth in half, capped at 38 each side
-	var boxWidth int
-	minHeightNeeded := 28
-	if metrics.GPUMetrics.HasGPU {
-		minHeightNeeded = 33
-	}
-	isSingleCol := ld.termWidth < 80 || ld.termHeight < minHeightNeeded
+// -------------------------------------------------------------
+// Tab 1: Dashboard
+// -------------------------------------------------------------
 
-	if isSingleCol {
-		boxWidth = ld.termWidth - 2
-		if boxWidth < 40 {
-			boxWidth = 40
-		}
-	} else {
-		boxWidth = (ld.termWidth - 3) / 2
-		if boxWidth < 37 {
-			boxWidth = 37
-		}
-		if boxWidth > 75 {
-			boxWidth = 75
-		}
+func (ld *LiveDisplay) renderDashboard(metrics *gather.LiveMetrics, theme Theme, availableHeight int) {
+	isDualCol := ld.termWidth >= 80 && availableHeight >= 14
+
+	if !isDualCol {
+		ld.renderDashboardSingleCol(metrics, theme, availableHeight)
+		return
 	}
 
-	// 1. Hardware Info Box (Right Column)
-	hwLines := []string{
-		formatBoxLine("CPU", ld.static.CPU, boxWidth-4, theme),
-		formatBoxLine("GPU", ld.static.GPU, boxWidth-4, theme),
-		formatBoxLine("Memory", ld.static.RAM, boxWidth-4, theme),
-	}
-	if ld.static.Swap != "" && ld.static.Swap != "None" && ld.static.Swap != "N/A" {
-		hwLines = append(hwLines, formatBoxLine("Swap", ld.static.Swap, boxWidth-4, theme))
-	} else {
-		hwLines = append(hwLines, formatBoxLine("Swap", "None", boxWidth-4, theme))
-	}
-	hwLines = append(hwLines, formatBoxLine("Disk Size", ld.static.Disk, boxWidth-4, theme))
+	// Dual Column Mode
+	leftW := (ld.termWidth - 3) / 2
+	rightW := ld.termWidth - leftW - 3
 
-	// 2. System Info Box (Left Column)
+	// --- Left Column: Box 1 (System & Hardware) + Box 2 (Network Info) ---
+	sysBoxH := (availableHeight * 11) / 20
+	if sysBoxH < 8 {
+		sysBoxH = 8
+	}
+	netBoxH := availableHeight - sysBoxH
+
 	wmDe := ld.static.WindowManager
 	if ld.static.DE != "" {
 		if wmDe != "" && wmDe != ld.static.DE {
@@ -378,356 +394,302 @@ func (ld *LiveDisplay) renderDashboard(metrics *gather.LiveMetrics, theme Theme)
 	}
 
 	sysLines := []string{
-		formatBoxLine("OS", ld.static.OS, boxWidth-4, theme),
-		formatBoxLine("Host", ld.static.Host, boxWidth-4, theme),
-		formatBoxLine("Kernel", ld.static.Kernel, boxWidth-4, theme),
-		formatBoxLine("Uptime", metrics.Uptime, boxWidth-4, theme),
-		formatBoxLine("WM/DE", wmDe, boxWidth-4, theme),
-		formatBoxLine("Resolution", ld.static.Resolution, boxWidth-4, theme),
-		formatBoxLine("Shell", ld.static.Shell, boxWidth-4, theme),
-		formatBoxLine("Terminal", ld.static.Terminal, boxWidth-4, theme),
-		formatBoxLine("Packages", ld.static.Packages, boxWidth-4, theme),
-		formatBoxLine("Virt", ld.static.Virtualization, boxWidth-4, theme),
-		formatBoxLine("Locale", ld.static.Locale, boxWidth-4, theme),
-		formatBoxLine("Local IP", ld.static.IPAddress, boxWidth-4, theme),
+		formatKeyVal("OS", ld.static.OS, leftW-4, theme),
+		formatKeyVal("Host", ld.static.Host, leftW-4, theme),
+		formatKeyVal("Kernel", ld.static.Kernel, leftW-4, theme),
+		formatKeyVal("Uptime", metrics.Uptime, leftW-4, theme),
+		formatKeyVal("CPU", ld.static.CPU, leftW-4, theme),
+		formatKeyVal("GPU", ld.static.GPU, leftW-4, theme),
+		formatKeyVal("Memory", ld.static.RAM, leftW-4, theme),
+		formatKeyVal("DE / WM", wmDe, leftW-4, theme),
+		formatKeyVal("Resolution", ld.static.Resolution, leftW-4, theme),
+		formatKeyVal("Shell / Term", fmt.Sprintf("%s / %s", ld.static.Shell, ld.static.Terminal), leftW-4, theme),
+		formatKeyVal("Packages", ld.static.Packages, leftW-4, theme),
+		formatKeyVal("Local IP", ld.static.IPAddress, leftW-4, theme),
+		formatKeyVal("Virt / Locale", fmt.Sprintf("%s / %s", ld.static.Virtualization, ld.static.Locale), leftW-4, theme),
 	}
+	sysBox := drawBox("◆ System & Hardware", sysLines, leftW, sysBoxH, theme)
 
-	// 3. Resource Stats Box (Right Column)
-	resLines := []string{
-		fmt.Sprintf("%sCPU Usage%s\033[90m: %s", theme.Key, theme.Reset, drawLiveProgressBar(metrics.CPUUsage, boxWidth-15, theme)),
-		fmt.Sprintf("%sRAM Usage%s\033[90m: %s", theme.Key, theme.Reset, drawLiveProgressBar(metrics.RAMPercent, boxWidth-15, theme)),
-		formatBoxLine("RAM Bytes", fmt.Sprintf("%s / %s", gather.FormatBytes(metrics.RAMUsed), gather.FormatBytes(metrics.RAMTotal)), boxWidth-4, theme),
-	}
-	if metrics.SwapTotal > 0 {
-		resLines = append(resLines, fmt.Sprintf("%sSwap     %s\033[90m: %s", theme.Key, theme.Reset, drawLiveProgressBar(metrics.SwapPercent, boxWidth-15, theme)))
-	} else {
-		resLines = append(resLines, formatBoxLine("Swap", "None", boxWidth-4, theme))
-	}
-	resLines = append(resLines, fmt.Sprintf("%sDisk (/) %s\033[90m: %s", theme.Key, theme.Reset, drawLiveProgressBar(metrics.DiskPercent, boxWidth-15, theme)))
+	// Clean Network Information Box
+	var netLines []string
+	netLines = append(netLines, formatKeyVal("Active Interface", metrics.NetIface, leftW-4, theme))
+	netLines = append(netLines, formatKeyVal("Local IP Address", ld.static.IPAddress, leftW-4, theme))
+	netLines = append(netLines, formatKeyVal("Download Speed", fmt.Sprintf("▼ %s/s (Peak: %s/s)", gather.FormatBytes(uint64(metrics.NetRxSpeed)), gather.FormatBytes(uint64(ld.peakRx))), leftW-4, theme))
+	netLines = append(netLines, formatKeyVal("Upload Speed", fmt.Sprintf("▲ %s/s (Peak: %s/s)", gather.FormatBytes(uint64(metrics.NetTxSpeed)), gather.FormatBytes(uint64(ld.peakTx))), leftW-4, theme))
+	netLines = append(netLines, formatKeyVal("Total Download", fmt.Sprintf("▼ %s", gather.FormatBytes(metrics.NetRxTotal)), leftW-4, theme))
+	netLines = append(netLines, formatKeyVal("Total Upload", fmt.Sprintf("▲ %s", gather.FormatBytes(metrics.NetTxTotal)), leftW-4, theme))
 
-	cpuTempStr := "N/A"
-	if metrics.Temperature > 0 {
-		cpuTempStr = fmt.Sprintf("%.1f °C", metrics.Temperature)
-	}
-	resLines = append(resLines, formatBoxLine("CPU Temp", cpuTempStr, boxWidth-4, theme))
+	netBox := drawBox("▲ Network Activity & IO", netLines, leftW, netBoxH, theme)
 
-	// 4. GPU Telemetry Box (Right Column, Nvidia/AMD/Intel)
-	var gpuLines []string
-	if metrics.GPUMetrics.HasGPU {
-		// Line 1: Usage
-		gpuLines = append(gpuLines, fmt.Sprintf("%sGPU Usage%s\033[90m: %s", theme.Key, theme.Reset, drawLiveProgressBar(metrics.GPUMetrics.GPUUsage, boxWidth-15, theme)))
-
-		// Line 2: Memory Progress Bar
-		if metrics.GPUMetrics.GPUMemUsage > 0 {
-			gpuLines = append(gpuLines, fmt.Sprintf("%sGPU Mem  %s\033[90m: %s", theme.Key, theme.Reset, drawLiveProgressBar(metrics.GPUMetrics.GPUMemUsage, boxWidth-15, theme)))
-		} else {
-			gpuLines = append(gpuLines, formatBoxLine("GPU Freq Info", "Integrated Graphics", boxWidth-4, theme))
-		}
-
-		// Line 3: Memory / Freq stats
-		if metrics.GPUMetrics.GPUMemUsage == 0 && metrics.GPUMetrics.GPUMemTotal > 0 {
-			gpuLines = append(gpuLines, formatBoxLine("GPU Freq", fmt.Sprintf("%d MHz / %d MHz", metrics.GPUMetrics.GPUMemUsed, metrics.GPUMetrics.GPUMemTotal), boxWidth-4, theme))
-		} else if metrics.GPUMetrics.GPUMemTotal > 0 {
-			gpuLines = append(gpuLines, formatBoxLine("GPU Memory", fmt.Sprintf("%d MB / %d MB", metrics.GPUMetrics.GPUMemUsed, metrics.GPUMetrics.GPUMemTotal), boxWidth-4, theme))
-		} else {
-			gpuLines = append(gpuLines, formatBoxLine("GPU Memory", "N/A", boxWidth-4, theme))
-		}
-
-		// Line 4: Temperature
-		gpuTempStr := "N/A"
-		if metrics.GPUMetrics.GPUTemp > 0 {
-			gpuTempStr = fmt.Sprintf("%.1f °C", metrics.GPUMetrics.GPUTemp)
-		}
-		gpuLines = append(gpuLines, formatBoxLine("GPU Temp", gpuTempStr, boxWidth-4, theme))
-	}
-
-	// 5. Network Box (Left Column)
-	netLines := []string{
-		formatBoxLine("Interface", metrics.NetIface, boxWidth-4, theme),
-		formatBoxLine("Download", fmt.Sprintf("%s/s", gather.FormatBytes(uint64(metrics.NetRxSpeed))), boxWidth-4, theme),
-		formatBoxLine("Upload", fmt.Sprintf("%s/s", gather.FormatBytes(uint64(metrics.NetTxSpeed))), boxWidth-4, theme),
-		formatBoxLine("Total Rx", gather.FormatBytes(metrics.NetRxTotal), boxWidth-4, theme),
-		formatBoxLine("Total Tx", gather.FormatBytes(metrics.NetTxTotal), boxWidth-4, theme),
-	}
-
-	// 6. Processes Box (Right Column)
-	nameColWidth := 12
-	if (boxWidth - 4) > 33 {
-		nameColWidth += (boxWidth - 4) - 33
-	}
-
-	procHeaderLine := fmt.Sprintf("%s%-6s %-*s %6s %6s%s", theme.Key, "PID", nameColWidth, "NAME", "CPU%", "RAM", theme.Reset)
-	procSepLine := "\033[90m" + strings.Repeat("─", boxWidth-4) + theme.Reset
-
-	procLines := []string{
-		procHeaderLine,
-		procSepLine,
-	}
-	limit := 5
-	actualProcCount := len(metrics.Processes)
-	if actualProcCount > limit {
-		actualProcCount = limit
-	}
-	for i := 0; i < actualProcCount; i++ {
-		p := metrics.Processes[i]
-		ramStr := formatShortBytes(p.RAM)
-
-		cpuColor := theme.Value
-		if p.CPU > 20.0 {
-			cpuColor = "\033[1;31m"
-		} else if p.CPU > 5.0 {
-			cpuColor = "\033[1;33m"
-		}
-
-		line := fmt.Sprintf("%-6d %-*s %s%5.1f%% %s%6s", p.PID, nameColWidth, truncateString(p.Name, nameColWidth), cpuColor, p.CPU, theme.Value, ramStr)
-		procLines = append(procLines, line)
-	}
-	// Pad with empty rows to keep the box height constant
-	for i := actualProcCount; i < limit; i++ {
-		procLines = append(procLines, strings.Repeat(" ", boxWidth-4))
-	}
-
-	// Dynamic layout rendering for constrained (single-column) screens
-	if isSingleCol {
-		var col []string
-
-		// 1. Resource Monitor (always first)
-		resBox := drawBox("Resource Monitor", resLines, boxWidth, theme)
-		col = append(col, resBox...)
-		currentHeight := len(col)
-		availableHeight := ld.termHeight - 8 // Header & footer padding
-
-		// 2. GPU Monitor
-		if metrics.GPUMetrics.HasGPU && currentHeight+len(gpuLines)+2 <= availableHeight {
-			gpuBox := drawBox("GPU Monitor", gpuLines, boxWidth, theme)
-			col = append(col, gpuBox...)
-			currentHeight = len(col)
-		}
-
-		// 3. Network Rates
-		if currentHeight+len(netLines)+2 <= availableHeight {
-			netBox := drawBox("Network Rates", netLines, boxWidth, theme)
-			col = append(col, netBox...)
-			currentHeight = len(col)
-		}
-
-		// 4. Top Processes
-		remainingForProc := availableHeight - currentHeight - 4 // border (2) + header/sep (2)
-		if remainingForProc >= 1 {
-			procLimit := remainingForProc
-			if procLimit > 5 {
-				procLimit = 5
-			}
-
-			dynamicProcLines := []string{procHeaderLine, procSepLine}
-			actualProcCount := len(metrics.Processes)
-			if actualProcCount > procLimit {
-				actualProcCount = procLimit
-			}
-			for i := 0; i < actualProcCount; i++ {
-				p := metrics.Processes[i]
-				ramStr := formatShortBytes(p.RAM)
-				cpuColor := theme.Value
-				if p.CPU > 20.0 {
-					cpuColor = "\033[1;31m"
-				} else if p.CPU > 5.0 {
-					cpuColor = "\033[1;33m"
-				}
-				line := fmt.Sprintf("%-6d %-*s %s%5.1f%% %s%6s", p.PID, nameColWidth, truncateString(p.Name, nameColWidth), cpuColor, p.CPU, theme.Value, ramStr)
-				dynamicProcLines = append(dynamicProcLines, line)
-			}
-
-			procBox := drawBox("Top Processes", dynamicProcLines, boxWidth, theme)
-			col = append(col, procBox...)
-			currentHeight = len(col)
-		}
-
-		// 5. Hardware Specs
-		if currentHeight+len(hwLines)+2 <= availableHeight {
-			hwBox := drawBox("Hardware Specs", hwLines, boxWidth, theme)
-			col = append(col, hwBox...)
-			currentHeight = len(col)
-		}
-
-		// 6. System Info
-		if currentHeight+len(sysLines)+2 <= availableHeight {
-			sysBox := drawBox("System Info", sysLines, boxWidth, theme)
-			col = append(col, sysBox...)
-		}
-
-		for _, line := range col {
-			fmt.Printf("%s\r\n", line)
-		}
-		return
-	}
-
-	// Pad either netLines or procLines so that left column and right column boxes align perfectly at the bottom!
-	// Left column consists of System Info (sysLines) and Network Rates (netLines) (2 boxes = 4 lines border)
-	// Right column consists of Hardware Specs (hwLines), Resource Monitor (resLines), GPU Monitor (gpuLines if Nvidia/AMD/Intel), and Top Processes (procLines)
-	totalLeftLines := len(sysLines) + len(netLines) + 4
-	totalRightLines := len(hwLines) + len(resLines) + len(procLines) + 6
-	if metrics.GPUMetrics.HasGPU {
-		totalRightLines += len(gpuLines) + 2
-	}
-
-	if totalLeftLines > totalRightLines {
-		diff := totalLeftLines - totalRightLines
-		for i := 0; i < diff; i++ {
-			procLines = append(procLines, strings.Repeat(" ", boxWidth-4))
-		}
-	} else if totalRightLines > totalLeftLines {
-		diff := totalRightLines - totalLeftLines
-		for i := 0; i < diff; i++ {
-			netLines = append(netLines, strings.Repeat(" ", boxWidth-4))
-		}
-	}
-
-	sysBox := drawBox("System Info", sysLines, boxWidth, theme)
-	netBox := drawBox("Network Rates", netLines, boxWidth, theme)
-
-	hwBox := drawBox("Hardware Specs", hwLines, boxWidth, theme)
-	resBox := drawBox("Resource Monitor", resLines, boxWidth, theme)
-
-	var gpuBox []string
-	if metrics.GPUMetrics.HasGPU {
-		gpuBox = drawBox("GPU Monitor", gpuLines, boxWidth, theme)
-	}
-
-	procBox := drawBox("Top Processes", procLines, boxWidth, theme)
-
-	// Display columns
 	leftCol := append(sysBox, netBox...)
 
-	var rightCol []string
+	// --- Right Column: Box 3 (Resource Monitor) + Box 4 (Top Processes) ---
+	resBoxH := 8
 	if metrics.GPUMetrics.HasGPU {
-		rightCol = append(hwBox, append(resBox, append(gpuBox, procBox...)...)...)
-	} else {
-		rightCol = append(hwBox, append(resBox, procBox...)...)
+		resBoxH = 9
 	}
+	if metrics.SwapTotal > 0 {
+		resBoxH++
+	}
+	procBoxH := availableHeight - resBoxH
+
+	// Resource Monitor Lines with Clean Progress Bars
+	barW := rightW - 28
+	if barW > 26 {
+		barW = 26
+	}
+	if barW < 10 {
+		barW = 10
+	}
+
+	var resLines []string
+	cpuTempStr := "N/A"
+	if metrics.Temperature > 0 {
+		cpuTempStr = formatTemp(metrics.Temperature)
+	}
+
+	resLines = append(resLines, fmt.Sprintf("%-10s %s  %s",
+		fmt.Sprintf("%sCPU Usage%s\033[90m:%s", theme.Key, theme.Reset, theme.Reset),
+		drawCleanBar(metrics.CPUUsage, barW),
+		cpuTempStr))
+
+	resLines = append(resLines, fmt.Sprintf("%-10s %s  \033[38;5;244m%s / %s\033[0m",
+		fmt.Sprintf("%sRAM Usage%s\033[90m:%s", theme.Key, theme.Reset, theme.Reset),
+		drawCleanBar(metrics.RAMPercent, barW),
+		gather.FormatBytes(metrics.RAMUsed), gather.FormatBytes(metrics.RAMTotal)))
+
+	if metrics.SwapTotal > 0 {
+		resLines = append(resLines, fmt.Sprintf("%-10s %s  \033[38;5;244m%s / %s\033[0m",
+			fmt.Sprintf("%sSwap     %s\033[90m:%s", theme.Key, theme.Reset, theme.Reset),
+			drawCleanBar(metrics.SwapPercent, barW),
+			gather.FormatBytes(metrics.SwapUsed), gather.FormatBytes(metrics.SwapTotal)))
+	}
+
+	resLines = append(resLines, fmt.Sprintf("%-10s %s  \033[38;5;244m%s / %s\033[0m",
+		fmt.Sprintf("%sDisk (/) %s\033[90m:%s", theme.Key, theme.Reset, theme.Reset),
+		drawCleanBar(metrics.DiskPercent, barW),
+		gather.FormatBytes(metrics.DiskUsed), gather.FormatBytes(metrics.DiskTotal)))
+
+	if metrics.GPUMetrics.HasGPU {
+		gpuTempStr := "N/A"
+		if metrics.GPUMetrics.GPUTemp > 0 {
+			gpuTempStr = formatTemp(metrics.GPUMetrics.GPUTemp)
+		}
+		resLines = append(resLines, fmt.Sprintf("%-10s %s  %s",
+			fmt.Sprintf("%sGPU Usage%s\033[90m:%s", theme.Key, theme.Reset, theme.Reset),
+			drawCleanBar(metrics.GPUMetrics.GPUUsage, barW),
+			gpuTempStr))
+	}
+
+	resBox := drawBox("◈ Resource Monitor", resLines, rightW, resBoxH, theme)
+
+	// Top Processes Lines
+	var procLines []string
+	nameW := rightW - 28
+	if nameW < 8 {
+		nameW = 8
+	}
+
+	procLines = append(procLines, fmt.Sprintf("%s%-6s %-*s %7s %7s%s", theme.Key, "PID", nameW, "COMMAND", "CPU%", "RAM", theme.Reset))
+	procLines = append(procLines, "\033[90m"+strings.Repeat("─", rightW-4)+theme.Reset)
+
+	maxProcs := procBoxH - 4
+	if maxProcs < 1 {
+		maxProcs = 1
+	}
+
+	actualCount := len(metrics.Processes)
+	if actualCount > maxProcs {
+		actualCount = maxProcs
+	}
+
+	for i := 0; i < actualCount; i++ {
+		p := metrics.Processes[i]
+		cpuColor := "\033[38;5;250m"
+		if p.CPU >= 50.0 {
+			cpuColor = "\033[1;38;5;196m" // Bold Red
+		} else if p.CPU >= 15.0 {
+			cpuColor = "\033[1;38;5;220m" // Amber
+		} else if p.CPU >= 5.0 {
+			cpuColor = "\033[38;5;48m" // Green
+		}
+
+		ramStr := formatShortBytes(p.RAM)
+		row := fmt.Sprintf("\033[38;5;45m%-6d\033[0m %-*s %s%6.1f%%\033[0m %7s",
+			p.PID, nameW, truncateAnsi(p.Name, nameW), cpuColor, p.CPU, ramStr)
+		procLines = append(procLines, row)
+	}
+
+	procBox := drawBox("⬢ Top Processes", procLines, rightW, procBoxH, theme)
+
+	rightCol := append(resBox, procBox...)
 
 	printSideBySide(leftCol, rightCol, 2)
 }
 
-func (ld *LiveDisplay) renderProcesses(metrics *gather.LiveMetrics, theme Theme) {
-	w := ld.termWidth
-	if w > 100 {
-		w = 100
+func (ld *LiveDisplay) renderDashboardSingleCol(metrics *gather.LiveMetrics, theme Theme, availableHeight int) {
+	w := ld.termWidth - 2
+	if w < 40 {
+		w = 40
 	}
 
-	pidWidth := 8
-	cpuWidth := 8
-	ramWidth := 10
-	ramPercWidth := 8
-	nameWidth := w - pidWidth - cpuWidth - ramWidth - ramPercWidth - 8
-	if nameWidth < 8 {
-		nameWidth = 8
-	}
+	var allRows []string
 
-	totalWidth := pidWidth + nameWidth + cpuWidth + ramWidth + ramPercWidth + 4
+	// 1. Resource Monitor
+	barW := 16
+	var resLines []string
+	resLines = append(resLines, fmt.Sprintf("%-10s %s", "CPU Usage:", drawCleanBar(metrics.CPUUsage, barW)))
+	resLines = append(resLines, fmt.Sprintf("%-10s %s", "RAM Usage:", drawCleanBar(metrics.RAMPercent, barW)))
+	resLines = append(resLines, formatKeyVal("RAM Bytes", fmt.Sprintf("%s / %s", gather.FormatBytes(metrics.RAMUsed), gather.FormatBytes(metrics.RAMTotal)), w-4, theme))
+	resLines = append(resLines, fmt.Sprintf("%-10s %s", "Disk (/):", drawCleanBar(metrics.DiskPercent, barW)))
 
-	var procLines []string
-	procLines = append(procLines, fmt.Sprintf("%s%-*s %-*s %*s %*s %*s%s",
-		theme.Key, pidWidth, "PID", nameWidth, "NAME", cpuWidth, "CPU%", ramWidth, "RAM", ramPercWidth, "RAM%", theme.Reset))
-	procLines = append(procLines, "\033[90m"+strings.Repeat("─", totalWidth)+theme.Reset)
+	resH := len(resLines) + 2
+	resBox := drawBox("◈ Resource Monitor", resLines, w, resH, theme)
+	allRows = append(allRows, resBox...)
 
-	headerPadding := 8
-	if ld.termHeight < 20 {
-		headerPadding = 5
-	}
-	limit := ld.termHeight - headerPadding - 4 // content header (1) + sep (1) + borders (2)
-	if limit < 1 {
-		limit = 1
-	}
-	if len(metrics.Processes) < limit {
-		limit = len(metrics.Processes)
-	}
-
-	for i := 0; i < limit; i++ {
-		p := metrics.Processes[i]
-		ramStr := gather.FormatBytes(p.RAM)
-
-		cpuColor := theme.Value
-		if p.CPU > 20.0 {
-			cpuColor = "\033[1;31m"
-		} else if p.CPU > 5.0 {
-			cpuColor = "\033[1;33m"
+	// 2. Processes
+	remH := availableHeight - len(allRows)
+	if remH >= 6 {
+		nameW := w - 24
+		if nameW < 8 {
+			nameW = 8
 		}
+		var procLines []string
+		procLines = append(procLines, fmt.Sprintf("%s%-6s %-*s %6s %7s%s", theme.Key, "PID", nameW, "COMMAND", "CPU%", "RAM", theme.Reset))
+		procLines = append(procLines, "\033[90m"+strings.Repeat("─", w-4)+theme.Reset)
 
-		ramColor := theme.Value
-		if p.RAM > 500*1024*1024 {
-			ramColor = "\033[1;31m"
-		} else if p.RAM > 150*1024*1024 {
-			ramColor = "\033[1;33m"
+		maxProcs := remH - 4
+		if maxProcs > len(metrics.Processes) {
+			maxProcs = len(metrics.Processes)
 		}
-
-		row := fmt.Sprintf("%-*d %-*s %s%*.1f%% %s%*s %s%*.1f%%",
-			pidWidth, p.PID,
-			nameWidth, truncateString(p.Name, nameWidth),
-			cpuColor, cpuWidth-1, p.CPU,
-			ramColor, ramWidth, ramStr,
-			theme.Value, ramPercWidth-1, p.RAMPerc)
-		procLines = append(procLines, row)
+		for i := 0; i < maxProcs; i++ {
+			p := metrics.Processes[i]
+			cpuColor := "\033[38;5;250m"
+			if p.CPU >= 20.0 {
+				cpuColor = "\033[1;38;5;196m"
+			} else if p.CPU >= 5.0 {
+				cpuColor = "\033[1;38;5;220m"
+			}
+			row := fmt.Sprintf("\033[38;5;45m%-6d\033[0m %-*s %s%5.1f%%\033[0m %7s",
+				p.PID, nameW, truncateAnsi(p.Name, nameW), cpuColor, p.CPU, formatShortBytes(p.RAM))
+			procLines = append(procLines, row)
+		}
+		procBox := drawBox("⬢ Top Processes", procLines, w, remH, theme)
+		allRows = append(allRows, procBox...)
 	}
 
-	box := drawBox("Expanded Process Monitor", procLines, totalWidth+4, theme)
-	for _, line := range box {
-		fmt.Printf("%s\r\n", line)
+	for _, l := range allRows {
+		fmt.Printf("%s\033[K\r\n", l)
 	}
 }
 
-func (ld *LiveDisplay) renderNetwork(metrics *gather.LiveMetrics, theme Theme) {
-	w := ld.termWidth
+// -------------------------------------------------------------
+// Tab 2: Processes (Full Height & Full Width Table)
+// -------------------------------------------------------------
+
+func (ld *LiveDisplay) renderProcesses(metrics *gather.LiveMetrics, theme Theme, availableHeight int) {
+	w := ld.termWidth - 2
 	if w < 50 {
 		w = 50
 	}
-	if w > 85 {
-		w = 85
+
+	pidW := 8
+	userW := 10
+	cpuW := 16
+	ramPercW := 16
+	ramByteW := 10
+	nameW := w - pidW - userW - cpuW - ramPercW - ramByteW - 8
+	if nameW < 12 {
+		nameW = 12
+	}
+
+	var procLines []string
+	header := fmt.Sprintf("%s%-*s %-*s %-*s %*s %*s %*s%s",
+		theme.Key, pidW, "PID", userW, "USER", nameW, "COMMAND / PROCESS", cpuW, "CPU USAGE", ramPercW, "MEM USAGE", ramByteW, "RAM", theme.Reset)
+	procLines = append(procLines, header)
+	procLines = append(procLines, "\033[90m"+strings.Repeat("─", w-4)+theme.Reset)
+
+	maxRows := availableHeight - 4
+	if maxRows < 1 {
+		maxRows = 1
+	}
+
+	totalProcs := len(metrics.Processes)
+	count := totalProcs
+	if count > maxRows {
+		count = maxRows
+	}
+
+	for i := 0; i < count; i++ {
+		p := metrics.Processes[i]
+		cpuBar := drawMiniBar(p.CPU, 6)
+		ramBar := drawMiniBar(float64(p.RAMPerc), 6)
+
+		userStr := "root"
+		if p.PID > 100 {
+			userStr = ld.static.Host
+			if len(userStr) > userW {
+				userStr = userStr[:userW]
+			}
+		}
+
+		cpuText := fmt.Sprintf("%5.1f%% %s", p.CPU, cpuBar)
+		ramText := fmt.Sprintf("%5.1f%% %s", p.RAMPerc, ramBar)
+
+		row := fmt.Sprintf("\033[38;5;45m%-*d\033[0m \033[38;5;244m%-*s\033[0m %-*s %*s %*s \033[38;5;250m%*s\033[0m",
+			pidW, p.PID,
+			userW, userStr,
+			nameW, truncateAnsi(p.Name, nameW),
+			cpuW, cpuText,
+			ramPercW, ramText,
+			ramByteW, formatShortBytes(p.RAM))
+		procLines = append(procLines, row)
+	}
+
+	box := drawBox(fmt.Sprintf("⬢ Process Activity Monitor (%d total processes)", totalProcs), procLines, w, availableHeight, theme)
+	for _, l := range box {
+		fmt.Printf("%s\033[K\r\n", l)
+	}
+}
+
+// -------------------------------------------------------------
+// Tab 3: Network (Clean Summary & Interfaces Table)
+// -------------------------------------------------------------
+
+func (ld *LiveDisplay) renderNetwork(metrics *gather.LiveMetrics, theme Theme, availableHeight int) {
+	w := ld.termWidth - 2
+	if w < 50 {
+		w = 50
 	}
 
 	var netLines []string
 
-	// Hostname and static network config (only if height is abundant)
-	if ld.termHeight >= 22 {
-		netLines = append(netLines, formatBoxLine("Hostname", ld.static.Hostname, w-4, theme))
-		netLines = append(netLines, formatBoxLine("Private IP", metrics.NetIface+" ("+ld.static.IPAddress+")", w-4, theme))
-		if metrics.NetRxTotal > 0 {
-			netLines = append(netLines, formatBoxLine("Total Download", gather.FormatBytes(metrics.NetRxTotal), w-4, theme))
-			netLines = append(netLines, formatBoxLine("Total Upload", gather.FormatBytes(metrics.NetTxTotal), w-4, theme))
-		}
-		netLines = append(netLines, "")
-	}
+	// 1. Network Metadata Header Cards
+	netLines = append(netLines, formatKeyVal("Hostname", ld.static.Hostname, w-4, theme))
+	netLines = append(netLines, formatKeyVal("Active Interface", fmt.Sprintf("%s (IP: %s)", metrics.NetIface, ld.static.IPAddress), w-4, theme))
+	netLines = append(netLines, formatKeyVal("Download Speed", fmt.Sprintf("▼ %s/s (Peak: %s/s)", gather.FormatBytes(uint64(metrics.NetRxSpeed)), gather.FormatBytes(uint64(ld.peakRx))), w-4, theme))
+	netLines = append(netLines, formatKeyVal("Upload Speed", fmt.Sprintf("▲ %s/s (Peak: %s/s)", gather.FormatBytes(uint64(metrics.NetTxSpeed)), gather.FormatBytes(uint64(ld.peakTx))), w-4, theme))
+	netLines = append(netLines, formatKeyVal("Total Traffic", fmt.Sprintf("▼ Download: %s   ▲ Upload: %s", gather.FormatBytes(metrics.NetRxTotal), gather.FormatBytes(metrics.NetTxTotal)), w-4, theme))
+	netLines = append(netLines, "")
 
-	colW := 15
-	if w < 55 {
-		colW = 12
-	}
-	netLines = append(netLines, fmt.Sprintf("%s%-*s %*s %*s%s", theme.Key, colW, "INTERFACE", colW, "RX SPEED", colW, "TX SPEED", theme.Reset))
+	// 2. Network Interfaces Table
+	ifaceColW := 18
+	speedColW := 14
+	netLines = append(netLines, fmt.Sprintf("%s%-*s %-*s %*s %*s%s", theme.Key, ifaceColW, "INTERFACE", 12, "STATE", speedColW, "RX SPEED", speedColW, "TX SPEED", theme.Reset))
 	netLines = append(netLines, "\033[90m"+strings.Repeat("─", w-4)+theme.Reset)
 
-	// List active interfaces with current speeds
 	ifaces, err := net.Interfaces()
 	if err == nil {
-		headerPadding := 10
-		if ld.termHeight < 22 {
-			headerPadding = 5
-		}
-		maxIfaces := ld.termHeight - headerPadding - 6 // tabs/header/footer + table header/sep/borders
-		if maxIfaces < 1 {
-			maxIfaces = 1
-		}
-
-		count := 0
 		for _, iface := range ifaces {
-			if iface.Flags&net.FlagUp == 0 {
+			if iface.Flags&net.FlagUp == 0 && iface.Flags&net.FlagLoopback == 0 {
 				continue
 			}
-			if count >= maxIfaces {
-				netLines = append(netLines, "... (more interfaces truncated)")
-				break
+			stateStr := "\033[38;5;48mUP\033[0m"
+			if iface.Flags&net.FlagUp == 0 {
+				stateStr = "\033[38;5;196mDOWN\033[0m"
 			}
-			isLoopback := iface.Flags&net.FlagLoopback != 0
 			name := iface.Name
-			if isLoopback {
+			if iface.Flags&net.FlagLoopback != 0 {
 				name += " (lo)"
 			}
 
@@ -740,48 +702,225 @@ func (ld *LiveDisplay) renderNetwork(metrics *gather.LiveMetrics, theme Theme) {
 				txS = "0 B/s"
 			}
 
-			netLines = append(netLines, fmt.Sprintf("%-*s %*s %*s", colW, name, colW, rxS, colW, txS))
-			count++
+			row := fmt.Sprintf("%-*s %-*s %*s %*s", ifaceColW, name, 12+9, stateStr, speedColW, rxS, speedColW, txS)
+			netLines = append(netLines, row)
 		}
 	}
 
-	box := drawBox("Network Interfaces and Speed", netLines, w, theme)
-	for _, line := range box {
-		fmt.Printf("%s\r\n", line)
+	box := drawBox("▲ Network Interfaces & Bandwidth Monitor", netLines, w, availableHeight, theme)
+	for _, l := range box {
+		fmt.Printf("%s\033[K\r\n", l)
 	}
 }
 
-func drawBox(title string, lines []string, width int, theme Theme) []string {
+// -------------------------------------------------------------
+// Tab 4: CPU Cores (Per-Core Thread Grid & Telemetry)
+// -------------------------------------------------------------
+
+func (ld *LiveDisplay) renderCores(metrics *gather.LiveMetrics, theme Theme, availableHeight int) {
+	w := ld.termWidth - 2
+	if w < 50 {
+		w = 50
+	}
+
+	var coreLines []string
+
+	// 1. CPU Hardware Info
+	coreLines = append(coreLines, formatKeyVal("CPU Model", ld.static.CPU, w-4, theme))
+	metaInfo := fmt.Sprintf("Threads: %d  │  Base Clock: %s  │  Temperature: %s",
+		len(metrics.CPUCores), ld.static.CPUSpeed, formatTemp(metrics.Temperature))
+	coreLines = append(coreLines, formatKeyVal("Topology", metaInfo, w-4, theme))
+	coreLines = append(coreLines, fmt.Sprintf("%-16s %s",
+		fmt.Sprintf("%sOverall CPU Load%s\033[90m:%s", theme.Key, theme.Reset, theme.Reset),
+		drawCleanBar(metrics.CPUUsage, 24)))
+	coreLines = append(coreLines, "")
+
+	// 2. Grid for CPU Cores (2 or 4 Columns)
+	numCores := len(metrics.CPUCores)
+	if numCores > 0 {
+		numCols := 2
+		if w >= 110 && numCores >= 8 {
+			numCols = 4
+		}
+
+		colW := (w - 4 - (numCols-1)*3) / numCols
+		if colW < 20 {
+			colW = 20
+			numCols = 2
+		}
+
+		barW := colW - 18
+		if barW < 8 {
+			barW = 8
+		}
+		if barW > 24 {
+			barW = 24
+		}
+
+		for i := 0; i < numCores; i += numCols {
+			var colParts []string
+			for c := 0; c < numCols; c++ {
+				idx := i + c
+				if idx < numCores {
+					val := metrics.CPUCores[idx]
+					bar := drawCleanBar(val, barW)
+					part := fmt.Sprintf("%sCPU %-2d%s\033[90m:%s %s", theme.Key, idx, theme.Reset, theme.Reset, bar)
+					colParts = append(colParts, part)
+				} else {
+					colParts = append(colParts, strings.Repeat(" ", colW))
+				}
+			}
+			coreLines = append(coreLines, strings.Join(colParts, " \033[90m│\033[0m "))
+		}
+	} else {
+		coreLines = append(coreLines, "No per-core CPU telemetry available.")
+	}
+
+	box := drawBox("■ CPU Cores Telemetry & Frequency", coreLines, w, availableHeight, theme)
+	for _, l := range box {
+		fmt.Printf("%s\033[K\r\n", l)
+	}
+}
+
+// -------------------------------------------------------------
+// Rendering & String Formatting Helpers
+// -------------------------------------------------------------
+
+func runeCellWidth(r rune) int {
+	// Zero-width characters (variation selectors, combining marks)
+	if (r >= 0xFE00 && r <= 0xFE0F) || (r >= 0x0300 && r <= 0x036F) {
+		return 0
+	}
+	// Common wide characters / emojis (2 cells)
+	if (r >= 0x1F000 && r <= 0x1FFFF) ||
+		(r >= 0x2600 && r <= 0x27BF) ||
+		(r >= 0x2B50 && r <= 0x2B55) ||
+		(r >= 0xFE10 && r <= 0xFE19) ||
+		(r >= 0x1100 && r <= 0x115F) ||
+		(r >= 0x2E80 && r <= 0x303E) ||
+		(r >= 0x3040 && r <= 0x33BF) ||
+		(r >= 0x4E00 && r <= 0x9FFF) ||
+		(r >= 0xAC00 && r <= 0xD7AF) ||
+		(r >= 0xF900 && r <= 0xFAFF) {
+		return 2
+	}
+	// Standard single-width printable runes
+	if r >= 0x20 {
+		return 1
+	}
+	return 0
+}
+
+func visualLen(s string) int {
+	stripped := stripAnsi(s)
+	width := 0
+	for _, r := range stripped {
+		width += runeCellWidth(r)
+	}
+	return width
+}
+
+func truncateAnsi(s string, maxVisualLen int) string {
+	if maxVisualLen <= 0 {
+		return ""
+	}
+	if visualLen(s) <= maxVisualLen {
+		return s
+	}
+
+	var sb strings.Builder
+	currentLen := 0
+	inEscape := false
+
+	runes := []rune(s)
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+		if r == 0x1b { // ESC
+			inEscape = true
+			sb.WriteRune(r)
+			continue
+		}
+		if inEscape {
+			sb.WriteRune(r)
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+				inEscape = false
+			}
+			continue
+		}
+
+		w := runeCellWidth(r)
+		if currentLen+w <= maxVisualLen {
+			sb.WriteRune(r)
+			currentLen += w
+		} else {
+			break
+		}
+	}
+	sb.WriteString("\033[0m")
+	return sb.String()
+}
+
+func padLine(s string, targetWidth int) string {
+	vLen := visualLen(s)
+	if vLen < targetWidth {
+		return s + strings.Repeat(" ", targetWidth-vLen)
+	}
+	if vLen > targetWidth {
+		return truncateAnsi(s, targetWidth)
+	}
+	return s
+}
+
+func drawBox(title string, lines []string, width int, height int, theme Theme) []string {
 	var box []string
 
 	borderColor := theme.Accent
 	if borderColor == "" {
-		borderColor = "\033[90m" // Fallback to dark gray
+		borderColor = "\033[38;5;39m"
 	}
 
-	titlePart := " " + title + " "
-	top := borderColor + "╭─" + theme.Reset + "\033[1m" + titlePart + theme.Reset + borderColor
-	visualLen := utf8.RuneCountInString(stripAnsi(top))
-	if visualLen < width-1 {
-		top += strings.Repeat("─", width-visualLen-1) + "╮" + theme.Reset
-	} else {
-		top = top[:width-1] + "╮" + theme.Reset
+	contentW := width - 4
+	if contentW < 4 {
+		contentW = 4
 	}
+
+	// 1. Top border with title
+	titlePart := " " + title + " "
+	if visualLen(titlePart) > contentW {
+		titlePart = " " + truncateAnsi(title, contentW-2) + " "
+	}
+	topPrefix := borderColor + "╭─┤" + theme.Reset + "\033[1m" + titlePart + theme.Reset + borderColor + "├"
+	prefixLen := visualLen(topPrefix)
+	remTop := width - prefixLen - 1
+	if remTop < 0 {
+		remTop = 0
+	}
+	top := topPrefix + strings.Repeat("─", remTop) + "╮" + theme.Reset
 	box = append(box, top)
 
-	for _, line := range lines {
-		stripped := stripAnsi(line)
-		lineVisualLen := utf8.RuneCountInString(stripped)
-		var paddedLine string
-		if lineVisualLen < width-4 {
-			paddedLine = line + strings.Repeat(" ", width-4-lineVisualLen)
-		} else {
-			paddedLine = "\033[0m" + truncateString(stripped, width-4)
-		}
-		box = append(box, borderColor+"│ "+theme.Reset+paddedLine+borderColor+" │"+theme.Reset)
+	// 2. Content rows
+	contentRows := height - 2
+	if contentRows < 0 {
+		contentRows = len(lines)
 	}
 
-	bottom := borderColor + "╰" + strings.Repeat("─", width-2) + "╯" + theme.Reset
+	for i := 0; i < contentRows; i++ {
+		var rowContent string
+		if i < len(lines) {
+			rowContent = lines[i]
+		} else {
+			rowContent = ""
+		}
+		padded := padLine(rowContent, contentW)
+		box = append(box, borderColor+"│ "+theme.Reset+padded+borderColor+" │"+theme.Reset)
+	}
+
+	// 3. Bottom border
+	bottomRem := width - 2
+	if bottomRem < 0 {
+		bottomRem = 0
+	}
+	bottom := borderColor + "╰" + strings.Repeat("─", bottomRem) + "╯" + theme.Reset
 	box = append(box, bottom)
 
 	return box
@@ -793,14 +932,13 @@ func printSideBySide(left []string, right []string, spacing int) {
 		max = len(right)
 	}
 
-	leftWidth := 0
+	leftW := 0
 	if len(left) > 0 {
-		leftWidth = utf8.RuneCountInString(stripAnsi(left[0]))
+		leftW = visualLen(left[0])
 	}
-
-	rightWidth := 0
+	rightW := 0
 	if len(right) > 0 {
-		rightWidth = utf8.RuneCountInString(stripAnsi(right[0]))
+		rightW = visualLen(right[0])
 	}
 
 	spacer := strings.Repeat(" ", spacing)
@@ -810,151 +948,103 @@ func printSideBySide(left []string, right []string, spacing int) {
 		if i < len(left) {
 			lPart = left[i]
 		} else {
-			lPart = strings.Repeat(" ", leftWidth)
+			lPart = strings.Repeat(" ", leftW)
 		}
 
 		var rPart string
 		if i < len(right) {
 			rPart = right[i]
 		} else {
-			rPart = strings.Repeat(" ", rightWidth)
+			rPart = strings.Repeat(" ", rightW)
 		}
 
-		fmt.Printf("%s%s%s\r\n", lPart, spacer, rPart)
+		fmt.Printf("%s%s%s\033[K\r\n", lPart, spacer, rPart)
 	}
 }
 
-func formatBoxLine(key string, val string, width int, theme Theme) string {
-	visualLen := utf8.RuneCountInString(key) + 2 + utf8.RuneCountInString(val)
-	if visualLen < width {
-		padding := strings.Repeat(" ", width-visualLen)
-		return fmt.Sprintf("%s%s%s\033[90m: %s%s%s%s", theme.Key, key, theme.Reset, theme.Value, val, theme.Reset, padding)
+func formatKeyVal(key string, val string, width int, theme Theme) string {
+	keyPart := fmt.Sprintf("%s%-16s%s\033[90m:%s", theme.Key, key, theme.Reset, theme.Reset)
+	vLenKey := visualLen(keyPart)
+	rem := width - vLenKey - 1
+	if rem < 4 {
+		rem = 4
 	}
-	allowedValLen := width - utf8.RuneCountInString(key) - 5
-	if allowedValLen > 3 {
-		val = truncateString(val, allowedValLen)
-	} else {
-		val = "..."
-	}
-	visualLen = utf8.RuneCountInString(key) + 2 + utf8.RuneCountInString(val)
-	padding := ""
-	if visualLen < width {
-		padding = strings.Repeat(" ", width-visualLen)
-	}
-	return fmt.Sprintf("%s%s%s\033[90m: %s%s%s%s", theme.Key, key, theme.Reset, theme.Value, val, theme.Reset, padding)
+	valTrunc := truncateAnsi(val, rem)
+	return padLine(fmt.Sprintf("%s \033[1;37m%s\033[0m", keyPart, valTrunc), width)
 }
 
-func drawLiveProgressBar(percent float64, width int, theme Theme) string {
+// drawCleanBar renders an ultra-clean, modern progress bar with sleek track
+func drawCleanBar(percent float64, barW int) string {
 	if percent < 0 {
 		percent = 0
 	} else if percent > 100 {
 		percent = 100
 	}
 
-	barWidth := width - 7
-	if barWidth < 5 {
-		barWidth = 5
+	if barW < 4 {
+		barW = 4
 	}
-	filled := int(float64(barWidth) * (percent / 100.0))
-	empty := barWidth - filled
+	filled := int(float64(barW) * (percent / 100.0))
+	empty := barW - filled
 
-	color := "\033[1;32m" // Green
-	if percent >= 85 {
-		color = "\033[1;31m" // Red
-	} else if percent >= 60 {
-		color = "\033[1;33m" // Yellow
+	var color string
+	if percent >= 80 {
+		color = "\033[1;38;5;196m" // Bold Red
+	} else if percent >= 50 {
+		color = "\033[1;38;5;220m" // Amber Gold
+	} else {
+		color = "\033[38;5;48m" // Bright Mint Green
 	}
 
-	filledStr := color + strings.Repeat("█", filled) + "\033[0m"
-	emptyStr := "\033[90m" + strings.Repeat("░", empty) + "\033[0m"
+	filledStr := color + strings.Repeat("■", filled) + "\033[0m"
+	emptyStr := "\033[90m" + strings.Repeat("─", empty) + "\033[0m"
 
-	return fmt.Sprintf("\033[90m[\033[0m%s%s\033[90m]\033[0m %3.0f%%", filledStr, emptyStr, percent)
+	return fmt.Sprintf("\033[90m[%s%s\033[90m]\033[0m \033[1;37m%3.0f%%\033[0m", filledStr, emptyStr, percent)
+}
+
+// drawMiniBar draws a tiny inline progress bar for the process table
+func drawMiniBar(percent float64, barW int) string {
+	if percent < 0 {
+		percent = 0
+	} else if percent > 100 {
+		percent = 100
+	}
+	if barW < 4 {
+		barW = 4
+	}
+	filled := int(float64(barW) * (percent / 100.0))
+	empty := barW - filled
+
+	var color string
+	if percent >= 50 {
+		color = "\033[1;38;5;196m"
+	} else if percent >= 20 {
+		color = "\033[1;38;5;220m"
+	} else {
+		color = "\033[38;5;48m"
+	}
+
+	return fmt.Sprintf("%s%s\033[90m%s\033[0m", color, strings.Repeat("■", filled), strings.Repeat("─", empty))
+}
+
+func formatTemp(t float64) string {
+	color := "\033[38;5;48m" // Green
+	if t >= 75 {
+		color = "\033[1;38;5;196m" // Red
+	} else if t >= 60 {
+		color = "\033[1;38;5;220m" // Yellow
+	}
+	return fmt.Sprintf("%s%.1f °C\033[0m", color, t)
 }
 
 func formatShortBytes(b uint64) string {
-	ramMB := float64(b) / (1024 * 1024)
-	if ramMB < 1.0 {
-		ramKB := float64(b) / 1024
-		return fmt.Sprintf("%.0fK", ramKB)
+	mb := float64(b) / (1024 * 1024)
+	if mb < 1.0 {
+		return fmt.Sprintf("%d B", b)
 	}
-	if ramMB < 1024 {
-		return fmt.Sprintf("%.0fM", ramMB)
+	if mb < 1024 {
+		return fmt.Sprintf("%.0fM", mb)
 	}
-	ramGB := ramMB / 1024
-	return fmt.Sprintf("%.1fG", ramGB)
-}
-
-func (ld *LiveDisplay) renderCores(metrics *gather.LiveMetrics, theme Theme) {
-	w := ld.termWidth
-	if w > 90 {
-		w = 90
-	}
-
-	var coreLines []string
-
-	// Print some static CPU hardware info at the top (only if height is abundant)
-	if ld.termHeight >= 20 {
-		coreLines = append(coreLines, formatBoxLine("CPU Model", ld.static.CPU, w-4, theme))
-		coreLines = append(coreLines, formatBoxLine("Cores/Threads", ld.static.CoresThreads, w-4, theme))
-		if ld.static.CPUSpeed != "" {
-			coreLines = append(coreLines, formatBoxLine("Base Speed", ld.static.CPUSpeed, w-4, theme))
-		}
-		coreLines = append(coreLines, "")
-	}
-
-	// 2-Column Grid for CPU Cores
-	numCores := len(metrics.CPUCores)
-	if numCores > 0 {
-		boxContentWidth := w - 4
-		colWidth := (boxContentWidth - 3) / 2
-		if colWidth < 20 {
-			colWidth = 20
-		}
-
-		headerPadding := 12
-		if ld.termHeight < 20 {
-			headerPadding = 7
-		}
-		maxCoreRows := ld.termHeight - headerPadding
-		if maxCoreRows < 2 {
-			maxCoreRows = 2
-		}
-
-		rowCount := 0
-		for i := 0; i < numCores; i += 2 {
-			if rowCount >= maxCoreRows {
-				coreLines = append(coreLines, "... (more CPU cores truncated)")
-				break
-			}
-
-			// Left CPU thread
-			coreLeftVal := metrics.CPUCores[i]
-			// Label is "CPU XX: " -> "CPU XX" is 6 chars. ": " is 2 chars. Total = 8.
-			// Progress bar takes colWidth - 8.
-			leftBar := drawLiveProgressBar(coreLeftVal, colWidth-8, theme)
-			leftPart := fmt.Sprintf("%sCPU %-2d%s\033[90m: %s", theme.Key, i, theme.Reset, leftBar)
-
-			rightPart := ""
-			if i+1 < numCores {
-				// Right CPU thread
-				coreRightVal := metrics.CPUCores[i+1]
-				rightBar := drawLiveProgressBar(coreRightVal, colWidth-8, theme)
-				rightPart = fmt.Sprintf("%sCPU %-2d%s\033[90m: %s", theme.Key, i+1, theme.Reset, rightBar)
-			} else {
-				rightPart = strings.Repeat(" ", colWidth)
-			}
-
-			spacer := " \033[90m│\033[0m "
-			row := fmt.Sprintf("%s%s%s", leftPart, spacer, rightPart)
-			coreLines = append(coreLines, row)
-			rowCount++
-		}
-	} else {
-		coreLines = append(coreLines, "No per-core CPU telemetry available.")
-	}
-
-	box := drawBox("Per-CPU Telemetry", coreLines, w, theme)
-	for _, line := range box {
-		fmt.Printf("%s\r\n", line)
-	}
+	gb := mb / 1024
+	return fmt.Sprintf("%.1fG", gb)
 }

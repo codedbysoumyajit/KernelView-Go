@@ -251,361 +251,8 @@ func gatherHostInfo(info *SystemInfo, wg *sync.WaitGroup) {
 	info.Hostname, _ = os.Hostname()
 }
 
-func isAndroid() bool {
-	return runtime.GOOS == "android" || os.Getenv("TERMUX_VERSION") != "" || os.Getenv("PREFIX") != ""
-}
-
-func getSystemProp(prop string) string {
-	cmd := exec.Command("getprop", prop)
-	out, err := cmd.Output()
-	if err == nil {
-		return strings.TrimSpace(string(out))
-	}
-	return ""
-}
-
-func getAndroidCPU() (model string, speed string) {
-	socModel := getSystemProp("ro.soc.model")
-	socManufacturer := getSystemProp("ro.soc.manufacturer")
-	boardPlatform := getSystemProp("ro.board.platform")
-	hardwareProp := getSystemProp("ro.hardware")
-	chipsetProp := getSystemProp("ro.chipset")
-
-	hwProcInfo := ""
-	if content, err := os.ReadFile("/proc/cpuinfo"); err == nil {
-		scanner := bufio.NewScanner(strings.NewReader(string(content)))
-		for scanner.Scan() {
-			line := scanner.Text()
-			if strings.HasPrefix(line, "Hardware\t:") || strings.HasPrefix(line, "Hardware:") {
-				parts := strings.SplitN(line, ":", 2)
-				if len(parts) == 2 {
-					hwProcInfo = strings.TrimSpace(parts[1])
-					break
-				}
-			}
-		}
-	}
-
-	rawIdentifier := socModel
-	if rawIdentifier == "" {
-		rawIdentifier = boardPlatform
-	}
-	if rawIdentifier == "" {
-		rawIdentifier = chipsetProp
-	}
-	if rawIdentifier == "" {
-		rawIdentifier = hardwareProp
-	}
-
-	friendlyName := resolveAndroidSoCName(rawIdentifier, socManufacturer, hwProcInfo)
-	if friendlyName != "" {
-		model = friendlyName
-	} else if hwProcInfo != "" && !strings.EqualFold(hwProcInfo, "unknown") {
-		model = cleanAndroidHWString(hwProcInfo)
-	} else if socModel != "" {
-		model = socModel
-	}
-
-	maxFreqKHz := uint64(0)
-	cpuDir := "/sys/devices/system/cpu"
-	if entries, err := os.ReadDir(cpuDir); err == nil {
-		for _, entry := range entries {
-			name := entry.Name()
-			if strings.HasPrefix(name, "cpu") && len(name) > 3 {
-				freqPaths := []string{
-					fmt.Sprintf("%s/%s/cpufreq/cpuinfo_max_freq", cpuDir, name),
-					fmt.Sprintf("%s/%s/cpufreq/scaling_max_freq", cpuDir, name),
-				}
-				for _, fp := range freqPaths {
-					if b, err := os.ReadFile(fp); err == nil {
-						if f, err := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 64); err == nil {
-							if f > maxFreqKHz {
-								maxFreqKHz = f
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-
-	if maxFreqKHz > 0 {
-		mhz := float64(maxFreqKHz) / 1000.0
-		if mhz >= 1000 {
-			speed = fmt.Sprintf("%.2f GHz", mhz/1000.0)
-		} else {
-			speed = fmt.Sprintf("%.0f MHz", mhz)
-		}
-	}
-
-	return model, speed
-}
-
-func resolveAndroidSoCName(rawId, manufacturer, hwInfo string) string {
-	combined := strings.ToLower(rawId + " " + manufacturer + " " + hwInfo)
-
-	snapdragonMap := map[string]string{
-		"sm8650":    "Qualcomm Snapdragon 8 Gen 3 (SM8650)",
-		"sm8550":    "Qualcomm Snapdragon 8 Gen 2 (SM8550)",
-		"sm8475":    "Qualcomm Snapdragon 8+ Gen 1 (SM8475)",
-		"sm8450":    "Qualcomm Snapdragon 8 Gen 1 (SM8450)",
-		"sm8350":    "Qualcomm Snapdragon 888 (SM8350)",
-		"sm8250":    "Qualcomm Snapdragon 865 (SM8250)",
-		"sm8150":    "Qualcomm Snapdragon 855 (SM8150)",
-		"sdm845":    "Qualcomm Snapdragon 845 (SDM845)",
-		"msm8998":   "Qualcomm Snapdragon 835 (MSM8998)",
-		"sm7325":    "Qualcomm Snapdragon 778G (SM7325)",
-		"sm7475":    "Qualcomm Snapdragon 7+ Gen 2 (SM7475)",
-		"sm7550":    "Qualcomm Snapdragon 7 Gen 3 (SM7550)",
-		"sm7675":    "Qualcomm Snapdragon 7+ Gen 3 (SM7675)",
-		"sm6375":    "Qualcomm Snapdragon 695 (SM6375)",
-		"sm6225":    "Qualcomm Snapdragon 680 (SM6225)",
-		"lahaina":   "Qualcomm Snapdragon 888",
-		"taro":      "Qualcomm Snapdragon 8 Gen 1",
-		"kalama":    "Qualcomm Snapdragon 8 Gen 2",
-		"pineapple": "Qualcomm Snapdragon 8 Gen 3",
-	}
-
-	for k, v := range snapdragonMap {
-		if strings.Contains(combined, k) {
-			return v
-		}
-	}
-
-	tensorMap := map[string]string{
-		"zuma_pro": "Google Tensor G4",
-		"zuma":     "Google Tensor G3",
-		"gs301":    "Google Tensor G3",
-		"gs201":    "Google Tensor G2",
-		"cheetah":  "Google Tensor G2",
-		"panther":  "Google Tensor G2",
-		"gs101":    "Google Tensor",
-		"oriole":   "Google Tensor",
-		"raven":    "Google Tensor",
-	}
-
-	for k, v := range tensorMap {
-		if strings.Contains(combined, k) {
-			return v
-		}
-	}
-
-	mtkMap := map[string]string{
-		"mt6989": "MediaTek Dimensity 9300 (MT6989)",
-		"mt6985": "MediaTek Dimensity 9200 (MT6985)",
-		"mt6983": "MediaTek Dimensity 9000 (MT6983)",
-		"mt6895": "MediaTek Dimensity 8100 (MT6895)",
-		"mt6893": "MediaTek Dimensity 1200 (MT6893)",
-		"mt6877": "MediaTek Dimensity 900 (MT6877)",
-		"mt6833": "MediaTek Dimensity 700 (MT6833)",
-		"mt6768": "MediaTek Helio G85 (MT6768)",
-		"mt6765": "MediaTek Helio P35 (MT6765)",
-		"mt6769": "MediaTek Helio G80 (MT6769)",
-	}
-
-	for k, v := range mtkMap {
-		if strings.Contains(combined, k) {
-			return v
-		}
-	}
-
-	exynosMap := map[string]string{
-		"exynos2400": "Samsung Exynos 2400",
-		"exynos2200": "Samsung Exynos 2200",
-		"exynos2100": "Samsung Exynos 2100",
-		"exynos990":  "Samsung Exynos 990",
-		"exynos9820": "Samsung Exynos 9820",
-		"exynos9810": "Samsung Exynos 9810",
-		"exynos1380": "Samsung Exynos 1380",
-		"exynos1280": "Samsung Exynos 1280",
-	}
-
-	for k, v := range exynosMap {
-		if strings.Contains(combined, k) {
-			return v
-		}
-	}
-
-	return ""
-}
-
-func cleanAndroidHWString(hw string) string {
-	hw = strings.ReplaceAll(hw, "Qualcomm Technologies, Inc", "Qualcomm")
-	hw = strings.ReplaceAll(hw, "Qualcomm Technologies Inc", "Qualcomm")
-	fields := strings.Fields(hw)
-	return strings.Join(fields, " ")
-}
-
-func getAndroidGPUDetails() (name, vendor, driver string) {
-	// Check sysfs Qualcomm KGSL
-	kgslPath := "/sys/class/kgsl/kgsl-3d0/gpu_model"
-	if b, err := os.ReadFile(kgslPath); err == nil {
-		m := strings.TrimSpace(string(b))
-		if m != "" {
-			vendor = "Qualcomm"
-			driver = "Qualcomm KGSL Driver"
-			if !strings.HasPrefix(strings.ToLower(m), "qualcomm") && !strings.HasPrefix(strings.ToLower(m), "adreno") {
-				name = "Qualcomm " + m
-			} else {
-				name = m
-			}
-			return name, vendor, driver
-		}
-	}
-
-	// Check sysfs ARM Mali
-	maliPath := "/sys/class/misc/mali0/device/gpuinfo"
-	if b, err := os.ReadFile(maliPath); err == nil {
-		m := strings.TrimSpace(string(b))
-		if m != "" {
-			vendor = "ARM"
-			driver = "ARM Mali Driver"
-			if !strings.HasPrefix(strings.ToLower(m), "arm") && !strings.HasPrefix(strings.ToLower(m), "mali") {
-				name = "ARM " + m
-			} else {
-				name = m
-			}
-			return name, vendor, driver
-		}
-	}
-
-	// Fallback via getprop properties
-	eglDriver := getSystemProp("ro.hardware.egl")
-	socModel := getSystemProp("ro.soc.model")
-	boardPlatform := getSystemProp("ro.board.platform")
-	combined := strings.ToLower(eglDriver + " " + socModel + " " + boardPlatform)
-
-	if strings.Contains(combined, "adreno") || eglDriver == "adreno" || strings.Contains(combined, "qcom") || strings.Contains(combined, "qualcomm") {
-		vendor = "Qualcomm"
-		driver = "Qualcomm Adreno Driver"
-		if strings.Contains(combined, "sm8650") || strings.Contains(combined, "pineapple") {
-			name = "Qualcomm Adreno 750"
-		} else if strings.Contains(combined, "sm8550") || strings.Contains(combined, "kalama") {
-			name = "Qualcomm Adreno 740"
-		} else if strings.Contains(combined, "sm8450") || strings.Contains(combined, "taro") {
-			name = "Qualcomm Adreno 730"
-		} else if strings.Contains(combined, "sm8350") || strings.Contains(combined, "lahaina") {
-			name = "Qualcomm Adreno 660"
-		} else if strings.Contains(combined, "sm8250") {
-			name = "Qualcomm Adreno 650"
-		} else if strings.Contains(combined, "sm8150") {
-			name = "Qualcomm Adreno 640"
-		} else if strings.Contains(combined, "sdm845") {
-			name = "Qualcomm Adreno 630"
-		} else if strings.Contains(combined, "sm7325") {
-			name = "Qualcomm Adreno 642L"
-		} else {
-			name = "Qualcomm Adreno GPU"
-		}
-		return name, vendor, driver
-	}
-
-	if strings.Contains(combined, "mali") {
-		vendor = "ARM"
-		driver = "ARM Mali Driver"
-		if strings.Contains(combined, "zuma_pro") {
-			name = "ARM Mali-G715 MP7"
-		} else if strings.Contains(combined, "zuma") || strings.Contains(combined, "gs301") {
-			name = "ARM Mali-G715 MP10"
-		} else if strings.Contains(combined, "gs201") || strings.Contains(combined, "cheetah") {
-			name = "ARM Mali-G710 MP7"
-		} else if strings.Contains(combined, "gs101") || strings.Contains(combined, "oriole") {
-			name = "ARM Mali-G78 MP20"
-		} else if strings.Contains(combined, "mt6989") {
-			name = "ARM Mali-G925"
-		} else if strings.Contains(combined, "mt6983") {
-			name = "ARM Mali-G710 MC10"
-		} else if strings.Contains(combined, "mt6895") {
-			name = "ARM Mali-G610 MC6"
-		} else {
-			name = "ARM Mali GPU"
-		}
-		return name, vendor, driver
-	}
-
-	if strings.Contains(combined, "xclipse") || strings.Contains(combined, "exynos2200") || strings.Contains(combined, "exynos2400") {
-		vendor = "Samsung"
-		driver = "Samsung Xclipse Driver"
-		if strings.Contains(combined, "exynos2400") {
-			name = "Samsung Xclipse 940 (AMD RDNA3)"
-		} else {
-			name = "Samsung Xclipse 920 (AMD RDNA2)"
-		}
-		return name, vendor, driver
-	}
-
-	if strings.Contains(combined, "powervr") || strings.Contains(combined, "pvr") {
-		vendor = "Imagination Technologies"
-		driver = "PowerVR Driver"
-		name = "PowerVR Rogue GPU"
-		return name, vendor, driver
-	}
-
-	return "", "", ""
-}
-
-func getAndroidGPUMetrics() (LiveGPUMetrics, error) {
-	metrics := LiveGPUMetrics{}
-
-	name, vendor, _ := getAndroidGPUDetails()
-	if name == "" && vendor == "" {
-		return metrics, fmt.Errorf("no Android GPU detected")
-	}
-
-	metrics.HasGPU = true
-
-	busyPath := "/sys/class/kgsl/kgsl-3d0/gpubusy"
-	if b, err := os.ReadFile(busyPath); err == nil {
-		fields := strings.Fields(string(b))
-		if len(fields) >= 2 {
-			used, err1 := strconv.ParseFloat(fields[0], 64)
-			total, err2 := strconv.ParseFloat(fields[1], 64)
-			if err1 == nil && err2 == nil && total > 0 {
-				metrics.GPUUsage = (used / total) * 100.0
-			}
-		}
-	}
-
-	if thermalDirs, err := os.ReadDir("/sys/class/thermal"); err == nil {
-		for _, td := range thermalDirs {
-			if strings.HasPrefix(td.Name(), "thermal_zone") {
-				typePath := fmt.Sprintf("/sys/class/thermal/%s/type", td.Name())
-				tempPath := fmt.Sprintf("/sys/class/thermal/%s/temp", td.Name())
-				if typeBytes, err := os.ReadFile(typePath); err == nil {
-					tType := strings.ToLower(strings.TrimSpace(string(typeBytes)))
-					if strings.Contains(tType, "gpu") || strings.Contains(tType, "kgsl") || strings.Contains(tType, "tsens_tz") {
-						if tempBytes, err := os.ReadFile(tempPath); err == nil {
-							if tVal, err := strconv.ParseFloat(strings.TrimSpace(string(tempBytes)), 64); err == nil {
-								if tVal > 1000 {
-									tVal = tVal / 1000.0
-								}
-								if tVal > 0 && tVal < 120 {
-									metrics.GPUTemp = tVal
-									break
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-
-	return metrics, nil
-}
-
 func gatherCPUInfo(info *SystemInfo, wg *sync.WaitGroup, isFast bool) {
 	defer wg.Done()
-
-	if isAndroid() {
-		cpuName, cpuSpeed := getAndroidCPU()
-		if cpuName != "" {
-			info.CPU = cpuName
-		}
-		if cpuSpeed != "" {
-			info.CPUSpeed = cpuSpeed
-		}
-	}
 
 	if info.CPU == "" || info.CPU == "Unknown Processor" || strings.HasPrefix(info.CPU, "ARMv") || strings.HasPrefix(info.CPU, "AArch64") {
 		cpuStats, err := cpu.Info()
@@ -901,12 +548,6 @@ func getLinuxGPU() string {
 }
 
 func getGPUInfo() string {
-	if isAndroid() {
-		gpuName, _, _ := getAndroidGPUDetails()
-		if gpuName != "" {
-			return gpuName
-		}
-	}
 	switch runtime.GOOS {
 	case "windows":
 		output := runShellCommand("(Get-CimInstance Win32_VideoController).Caption")
@@ -1184,12 +825,7 @@ func getTerminal() string {
 		return strings.Title(termProg)
 	}
 
-	// 2. Check TERMUX_VERSION (Termux on Android)
-	if os.Getenv("TERMUX_VERSION") != "" {
-		return "Termux"
-	}
-
-	// 3. Check specific env variables set by terminal emulators
+	// 2. Check specific env variables set by terminal emulators
 	if os.Getenv("ALACRITTY_LOG") != "" || os.Getenv("ALACRITTY_SOCKET") != "" {
 		return "Alacritty"
 	}
@@ -1902,6 +1538,7 @@ type LiveTracker struct {
 	// Cached processes list
 	cachedProcesses []ProcessInfo
 	lastProcUpdate  time.Time
+	procScanning    bool
 
 	// Cached disk usage
 	cachedDiskUsed    uint64
@@ -1920,6 +1557,12 @@ type LiveTracker struct {
 	// Cached GPU metrics
 	cachedGPUMetrics LiveGPUMetrics
 	lastGPUUpdate    time.Time
+
+	// Smoothed metrics for visual stability (anti-jitter)
+	smoothedCPU   float64
+	smoothedCores []float64
+	smoothedNetRx float64
+	smoothedNetTx float64
 }
 
 // NewLiveTracker creates a new tracker instance (Exported)
@@ -1969,23 +1612,46 @@ func (lt *LiveTracker) GetMetrics() (*LiveMetrics, error) {
 		}
 	}
 
-	// 2. CPU Usage & Per-Core Percentages (real-time, queried every 500ms)
+	// 2. CPU Usage & Per-Core Percentages (real-time, queried with EMA anti-jitter smoothing)
 	percentages, err := cpu.Percent(0, true)
 	if err == nil && len(percentages) > 0 {
-		metrics.CPUCores = percentages
 		var sum float64
 		for _, p := range percentages {
 			sum += p
 		}
-		metrics.CPUUsage = sum / float64(len(percentages))
+		rawOverall := sum / float64(len(percentages))
+
+		// Apply Exponential Moving Average for smooth, non-jittery meter display
+		if lt.smoothedCPU == 0 {
+			lt.smoothedCPU = rawOverall
+		} else {
+			lt.smoothedCPU = 0.40*rawOverall + 0.60*lt.smoothedCPU
+		}
+		metrics.CPUUsage = lt.smoothedCPU
+
+		if len(lt.smoothedCores) != len(percentages) {
+			lt.smoothedCores = make([]float64, len(percentages))
+			copy(lt.smoothedCores, percentages)
+		} else {
+			for i := range percentages {
+				lt.smoothedCores[i] = 0.40*percentages[i] + 0.60*lt.smoothedCores[i]
+			}
+		}
+		metrics.CPUCores = make([]float64, len(lt.smoothedCores))
+		copy(metrics.CPUCores, lt.smoothedCores)
 	} else {
 		overall, err := cpu.Percent(0, false)
 		if err == nil && len(overall) > 0 {
-			metrics.CPUUsage = overall[0]
+			if lt.smoothedCPU == 0 {
+				lt.smoothedCPU = overall[0]
+			} else {
+				lt.smoothedCPU = 0.40*overall[0] + 0.60*lt.smoothedCPU
+			}
+			metrics.CPUUsage = lt.smoothedCPU
 		}
 	}
 
-	// 3. Memory (real-time, queried every 500ms)
+	// 3. Memory (real-time)
 	if runtime.GOOS == "linux" {
 		file, err := os.Open("/proc/meminfo")
 		if err == nil {
@@ -2084,7 +1750,7 @@ func (lt *LiveTracker) GetMetrics() (*LiveMetrics, error) {
 	}
 	metrics.Temperature = lt.cachedTemp
 
-	// 6. Network Rates (Iface list cached for 10 seconds, stats queried every 500ms)
+	// 6. Network Rates (Iface list cached for 10 seconds, stats queried in real-time)
 	var rxTotal, txTotal uint64
 	var activeIface string
 	counters, err := psnet.IOCounters(true)
@@ -2123,12 +1789,28 @@ func (lt *LiveTracker) GetMetrics() (*LiveMetrics, error) {
 	if !lt.prevNetTime.IsZero() {
 		elapsed := now.Sub(lt.prevNetTime).Seconds()
 		if elapsed > 0 {
+			rawRxSpeed := 0.0
+			rawTxSpeed := 0.0
 			if rxTotal >= lt.prevNetRx {
-				metrics.NetRxSpeed = float64(rxTotal-lt.prevNetRx) / elapsed
+				rawRxSpeed = float64(rxTotal-lt.prevNetRx) / elapsed
 			}
 			if txTotal >= lt.prevNetTx {
-				metrics.NetTxSpeed = float64(txTotal-lt.prevNetTx) / elapsed
+				rawTxSpeed = float64(txTotal-lt.prevNetTx) / elapsed
 			}
+
+			if lt.smoothedNetRx == 0 {
+				lt.smoothedNetRx = rawRxSpeed
+			} else {
+				lt.smoothedNetRx = 0.50*rawRxSpeed + 0.50*lt.smoothedNetRx
+			}
+
+			if lt.smoothedNetTx == 0 {
+				lt.smoothedNetTx = rawTxSpeed
+			} else {
+				lt.smoothedNetTx = 0.50*rawTxSpeed + 0.50*lt.smoothedNetTx
+			}
+			metrics.NetRxSpeed = lt.smoothedNetRx
+			metrics.NetTxSpeed = lt.smoothedNetTx
 		}
 	}
 	lt.prevNetRx = rxTotal
@@ -2148,103 +1830,117 @@ func (lt *LiveTracker) GetMetrics() (*LiveMetrics, error) {
 	}
 	metrics.GPUMetrics = lt.cachedGPUMetrics
 
-	// 8. Processes (expensive, cached for 2 seconds)
-	if time.Since(lt.lastProcUpdate) >= 2*time.Second || lt.lastProcUpdate.IsZero() || len(lt.cachedProcesses) == 0 {
-		pids, err := process.Pids()
-		if err == nil {
-			currentPids := make(map[int32]bool)
-			for _, pid := range pids {
-				currentPids[pid] = true
-			}
-
-			for pid := range lt.procsMap {
-				if !currentPids[pid] {
-					delete(lt.procsMap, pid)
-				}
-			}
-
-			for _, pid := range pids {
-				if _, exists := lt.procsMap[pid]; !exists {
-					proc, err := process.NewProcess(pid)
-					if err == nil {
-						lt.procsMap[pid] = proc
-						_, _ = proc.CPUPercent()
-					}
-				}
-			}
-
-			var wg sync.WaitGroup
-			sem := make(chan struct{}, 32)
-			results := make(chan ProcessInfo, len(lt.procsMap))
-
-			for _, proc := range lt.procsMap {
-				if proc == nil {
-					continue
-				}
-				wg.Add(1)
-				go func(p *process.Process) {
-					defer wg.Done()
-					defer func() { _ = recover() }()
-					if p == nil {
-						return
-					}
-					sem <- struct{}{}
-					defer func() { <-sem }()
-
-					pid := p.Pid
-					name, err := p.Name()
-					if err != nil || name == "" || pid <= 1 {
-						return
-					}
-
-					if runtime.GOOS == "linux" && (strings.HasPrefix(name, "[") || name == "systemd" || name == "init") {
-						return
-					}
-					if name == "kernel_task" || name == "idle" {
-						return
-					}
-
-					cpuPerc, err := p.CPUPercent()
-					if err != nil {
-						cpuPerc = 0.0
-					}
-					memInfo, errMem := p.MemoryInfo()
-					memPerc, errMemPerc := p.MemoryPercent()
-
-					if errMem == nil && errMemPerc == nil && memInfo != nil {
-						results <- ProcessInfo{
-							PID:     pid,
-							Name:    name,
-							CPU:     cpuPerc,
-							RAM:     memInfo.RSS,
-							RAMPerc: memPerc,
-						}
-					}
-				}(proc)
-			}
-
-			wg.Wait()
-			close(results)
-
-			var procList []ProcessInfo
-			for pInfo := range results {
-				procList = append(procList, pInfo)
-			}
-
-			sort.Slice(procList, func(i, j int) bool {
-				if procList[i].CPU != procList[j].CPU {
-					return procList[i].CPU > procList[j].CPU
-				}
-				return procList[i].RAM > procList[j].RAM
-			})
-
-			lt.cachedProcesses = procList
-			lt.lastProcUpdate = time.Now()
-		}
+	// 8. Processes (asynchronous background scanning for zero UI delay)
+	if (time.Since(lt.lastProcUpdate) >= 1500*time.Millisecond || len(lt.cachedProcesses) == 0) && !lt.procScanning {
+		lt.procScanning = true
+		go lt.scanProcessesAsync()
 	}
 	metrics.Processes = lt.cachedProcesses
 
 	return metrics, nil
+}
+
+func (lt *LiveTracker) scanProcessesAsync() {
+	defer func() {
+		lt.mu.Lock()
+		lt.procScanning = false
+		lt.mu.Unlock()
+	}()
+
+	pids, err := process.Pids()
+	if err != nil {
+		return
+	}
+	currentPids := make(map[int32]bool, len(pids))
+	for _, pid := range pids {
+		currentPids[pid] = true
+	}
+
+	lt.mu.Lock()
+	for pid := range lt.procsMap {
+		if !currentPids[pid] {
+			delete(lt.procsMap, pid)
+		}
+	}
+	for _, pid := range pids {
+		if _, exists := lt.procsMap[pid]; !exists {
+			proc, err := process.NewProcess(pid)
+			if err == nil {
+				lt.procsMap[pid] = proc
+				_, _ = proc.CPUPercent()
+			}
+		}
+	}
+	procs := make([]*process.Process, 0, len(lt.procsMap))
+	for _, p := range lt.procsMap {
+		if p != nil {
+			procs = append(procs, p)
+		}
+	}
+	lt.mu.Unlock()
+
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 16)
+	results := make(chan ProcessInfo, len(procs))
+
+	for _, proc := range procs {
+		wg.Add(1)
+		go func(p *process.Process) {
+			defer wg.Done()
+			defer func() { _ = recover() }()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			pid := p.Pid
+			name, err := p.Name()
+			if err != nil || name == "" || pid <= 1 {
+				return
+			}
+			if runtime.GOOS == "linux" && (strings.HasPrefix(name, "[") || name == "systemd" || name == "init") {
+				return
+			}
+			if name == "kernel_task" || name == "idle" {
+				return
+			}
+
+			cpuPerc, err := p.CPUPercent()
+			if err != nil {
+				cpuPerc = 0.0
+			}
+			memInfo, errMem := p.MemoryInfo()
+			memPerc, errMemPerc := p.MemoryPercent()
+
+			if errMem == nil && errMemPerc == nil && memInfo != nil {
+				results <- ProcessInfo{
+					PID:     pid,
+					Name:    name,
+					CPU:     cpuPerc,
+					RAM:     memInfo.RSS,
+					RAMPerc: memPerc,
+				}
+			}
+		}(proc)
+	}
+
+	wg.Wait()
+	close(results)
+
+	var procList []ProcessInfo
+	for pInfo := range results {
+		procList = append(procList, pInfo)
+	}
+
+	sort.Slice(procList, func(i, j int) bool {
+		if procList[i].CPU != procList[j].CPU {
+			return procList[i].CPU > procList[j].CPU
+		}
+		return procList[i].RAM > procList[j].RAM
+	})
+
+	lt.mu.Lock()
+	lt.cachedProcesses = procList
+	lt.lastProcUpdate = time.Now()
+	lt.mu.Unlock()
 }
 
 // LiveGPUMetrics holds real-time GPU stats (Exported)
@@ -2277,12 +1973,6 @@ func getAMDOrIntelTemp(cardName string) float64 {
 
 func getGPUMetrics() (LiveGPUMetrics, error) {
 	metrics := LiveGPUMetrics{}
-
-	if isAndroid() {
-		if androidMetrics, err := getAndroidGPUMetrics(); err == nil && androidMetrics.HasGPU {
-			return androidMetrics, nil
-		}
-	}
 
 	// 1. Try Nvidia-smi first (Proprietary Nvidia driver)
 	if nvidia, err := getNvidiaGPUMetrics(); err == nil && nvidia.HasGPU {
@@ -2476,23 +2166,6 @@ func GetGPUDetails() *GPUDetails {
 		CUDA:        "Unknown",
 	}
 
-	// 1. Resolve name, vendor, driver for Android
-	if isAndroid() {
-		gpuName, vendor, driver := getAndroidGPUDetails()
-		if gpuName != "" {
-			details.Name = gpuName
-		}
-		if vendor != "" {
-			details.Vendor = vendor
-		}
-		if driver != "" {
-			details.Driver = driver
-		}
-		if androidMetrics, err := getAndroidGPUMetrics(); err == nil && androidMetrics.GPUTemp > 0 {
-			details.Temperature = fmt.Sprintf("%.1f °C", androidMetrics.GPUTemp)
-		}
-	}
-
 	if details.Name == "" || details.Name == "Unknown GPU" {
 		if name := getLinuxGPU(); name != "" {
 			details.Name = name
@@ -2635,16 +2308,6 @@ func GetGPUDetails() *GPUDetails {
 }
 
 func getOpenGLVersion() string {
-	if isAndroid() {
-		verProp := getSystemProp("ro.opengles.version")
-		if verProp != "" {
-			if val, err := strconv.ParseUint(verProp, 10, 32); err == nil && val > 0 {
-				major := val >> 16
-				minor := val & 0xFFFF
-				return fmt.Sprintf("OpenGL ES %d.%d", major, minor)
-			}
-		}
-	}
 	cmd := exec.Command("glxinfo")
 	out, err := cmd.Output()
 	if err == nil {
@@ -2669,12 +2332,6 @@ func getOpenGLVersion() string {
 }
 
 func getVulkanVersion() string {
-	if isAndroid() {
-		vulkanProp := getSystemProp("ro.hardware.vulkan")
-		if vulkanProp != "" {
-			return fmt.Sprintf("Vulkan (%s)", strings.Title(vulkanProp))
-		}
-	}
 	cmd := exec.Command("vulkaninfo", "--summary")
 	out, err := cmd.Output()
 	if err == nil {
@@ -2821,22 +2478,6 @@ func GetMockSystemInfo(distro string) *SystemInfo {
 		info.Terminal = "Windows Terminal"
 		info.DE = "Explorer"
 		info.WindowManager = "DWM"
-	case "android":
-		info.OS = "Android 14 (Termux)"
-		info.Kernel = "Linux 5.15.123-android14-11"
-		info.CPU = "Qualcomm Snapdragon 8 Gen 1 (SM8450)"
-		info.CoresThreads = "8/8"
-		info.CPUSpeed = "3.00 GHz"
-		info.GPU = "Qualcomm Adreno 730"
-		info.RAM = "5.2GB / 12.0GB (43%)"
-		info.Swap = "1.0GB / 4.0GB (25%)"
-		info.Disk = "64GB / 256GB (25%)"
-		info.IPAddress = "192.168.1.150"
-		info.Packages = "Pkg (450)"
-		info.Shell = "zsh 5.9"
-		info.Terminal = "Termux"
-		info.DE = "Android GUI"
-		info.WindowManager = "SurfaceFlinger"
 	default:
 		info.OS = "Generic Linux"
 		info.Kernel = "Linux 6.1.0"
@@ -2910,16 +2551,6 @@ func GetMockGPUDetails(distro string) *GPUDetails {
 		details.Vulkan = "Vulkan 1.3.278"
 		details.OpenCL = "OpenCL 3.0 CUDA"
 		details.CUDA = "release 12.4"
-	case "android":
-		details.Name = "Qualcomm Adreno 730"
-		details.Vendor = "Qualcomm"
-		details.Driver = "Qualcomm KGSL Driver"
-		details.VRAMUsed = "1.5 GB"
-		details.VRAMTotal = "6.0 GB"
-		details.VRAMFree = "4.5 GB"
-		details.Temperature = "38.5 °C"
-		details.OpenGL = "OpenGL ES 3.2"
-		details.Vulkan = "Vulkan 1.3 (Adreno)"
 	}
 	return details
 }

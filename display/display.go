@@ -104,15 +104,9 @@ func getDistroKey() string {
 	if runtime.GOOS == "darwin" {
 		return "macos"
 	}
-	if runtime.GOOS == "android" || os.Getenv("TERMUX_VERSION") != "" {
-		return "android"
-	}
 
-	// Read standard /etc/os-release or Termux prefixed os-release
+	// Read standard /etc/os-release
 	osReleasePaths := []string{"/etc/os-release"}
-	if prefix := os.Getenv("PREFIX"); prefix != "" {
-		osReleasePaths = append(osReleasePaths, prefix+"/etc/os-release")
-	}
 
 	for _, path := range osReleasePaths {
 		if content, err := os.ReadFile(path); err == nil {
@@ -149,9 +143,6 @@ func getDistroKey() string {
 			}
 			if strings.Contains(contentStr, "mint") {
 				return "mint"
-			}
-			if strings.Contains(contentStr, "android") {
-				return "android"
 			}
 		}
 	}
@@ -229,14 +220,6 @@ func GetThemeForDistro(distroKey string, noColor bool) Theme {
 			Key:      "\033[1;34m",
 			Value:    valColor,
 			Accent:   "\033[1;34m",
-			Reset:    reset,
-		}
-	case "android":
-		return Theme{
-			Category: "\033[1;38;5;118m", // Bold Lime Green
-			Key:      "\033[1;38;5;118m",
-			Value:    valColor,
-			Accent:   "\033[1;38;5;118m",
 			Reset:    reset,
 		}
 	case "gentoo":

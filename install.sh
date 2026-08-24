@@ -36,15 +36,9 @@ echo "Extracting..."
 tar -xzf kernelview.tar.gz kernelview
 
 # Determine installation directory
-if [ -n "$PREFIX" ]; then
-    INSTALL_DIR="$PREFIX/bin"
-    echo "Termux environment detected. Installing to $INSTALL_DIR..."
-    mv kernelview "$INSTALL_DIR/"
-else
-    INSTALL_DIR="/usr/local/bin"
-    echo "Installing to $INSTALL_DIR (requires sudo)..."
-    sudo mv kernelview "$INSTALL_DIR/"
-fi
+INSTALL_DIR="/usr/local/bin"
+echo "Installing to $INSTALL_DIR (requires sudo)..."
+sudo mv kernelview "$INSTALL_DIR/"
 
 rm -f kernelview.tar.gz
 

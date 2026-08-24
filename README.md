@@ -56,7 +56,7 @@ To maintain a near-zero CPU footprint, the live loop splits real-time metrics (C
 
 | Linux Distributions | Apple macOS | Microsoft Windows |
 | :--- | :--- | :--- |
-| Arch Linux, Manjaro, Ubuntu, Debian, Fedora, CentOS, Alpine, Android (Termux), Gentoo, RedHat (RHEL), OpenSUSE, Linux Mint | macOS (Apple Silicon & Intel) | Windows 10 & 11 (Cmd, PowerShell, Terminal) |
+| Arch Linux, Manjaro, Ubuntu, Debian, Fedora, CentOS, Alpine, Gentoo, RedHat (RHEL), OpenSUSE, Linux Mint | macOS (Apple Silicon & Intel) | Windows 10 & 11 (Cmd, PowerShell, Terminal) |
 
 ---
 
