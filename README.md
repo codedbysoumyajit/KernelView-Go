@@ -1,6 +1,9 @@
 # 🚀 KernelView Go
 
 <p align="center">
+  <a href="https://kernelview.codedbysoumyajit.dev">
+    <img src="https://img.shields.io/badge/Website-kernelview.codedbysoumyajit.dev-blueviolet?style=for-the-badge&logo=googlechrome&logoColor=white" alt="Website" />
+  </a>
   <img src="https://img.shields.io/badge/Language-Go-00ADD8?style=for-the-badge&logo=go" alt="Go" />
   <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="MIT License" />
   <img src="https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows%20%7C%20BSD-blue?style=for-the-badge" alt="Platforms" />
@@ -17,12 +20,33 @@
 
 **KernelView Go** is an ultra-fast, aesthetic system information fetcher and real-time terminal telemetry dashboard written in pure Go. Engineered for maximum efficiency, sub-millisecond data gathering, and zero runtime dependencies, it delivers instant hardware telemetry, distro-branded ASCII aesthetics, and an interactive multi-tab live TUI dashboard.
 
+🌐 **Official Website & Docs**: [https://kernelview.codedbysoumyajit.dev](https://kernelview.codedbysoumyajit.dev)
+
+---
+
+## 📸 Visual Showcase
+
+<p align="center">
+  <b>System Fetch with Distro-Branded ASCII Art & Hardware Specs</b><br>
+  <img src="assets/kernelview.png" alt="KernelView Go System Fetch" width="90%" />
+</p>
+
+<p align="center">
+  <b>Interactive Real-Time TUI Dashboard (Multi-Tab Telemetry)</b><br>
+  <img src="assets/kernelview-live.png" alt="KernelView Go Live Dashboard" width="90%" />
+</p>
+
+<p align="center">
+  <b>Multi-Core CPU Frequency & Utilization Grid</b><br>
+  <img src="assets/live-cpu.png" alt="KernelView Go CPU Cores Monitor" width="90%" />
+</p>
+
 ---
 
 ## ✨ Key Features
 
 ### 🎨 1. Distro-Branded CLI Fetch
-* **Authentic ASCII Art**: Crisp, authentic terminal ASCII art for Linux distributions, macOS, Windows, and BSD variants.
+* **Authentic ASCII Art**: Crisp, authentic terminal ASCII art for 40+ Linux distributions, macOS, Windows, and BSD variants matching Fastfetch.
 * **Intelligent Theme Matching**: Automatically identifies the host operating system or distribution and styles titles, labels, keys, borders, and dividers in matching palette accents.
 * **Side-by-Side Responsive Layout**: Renders ASCII art alongside system telemetry, with seamless auto-wrapping and vertical stacking on narrow terminals.
 * **Terminal Color Grid**: Includes classic 16-color ANSI color blocks (`███`) for palette verification.
@@ -53,7 +77,7 @@
 
 | Linux Distributions | Apple macOS | Microsoft Windows | BSD Systems |
 | :--- | :--- | :--- | :--- |
-| Fedora, Arch Linux, Ubuntu, Debian, Manjaro, Pop!_OS, NixOS, Void Linux, Alpine, Gentoo, openSUSE, RHEL, CentOS, Linux Mint | macOS (Apple Silicon M1/M2/M3/M4 & Intel) | Windows 11 & 10 (Windows Terminal, PowerShell, CMD) | FreeBSD, OpenBSD, NetBSD |
+| **Fedora, Arch Linux, Ubuntu, Debian, Manjaro, Pop!_OS, NixOS, Void Linux, Kali Linux, Zorin OS, MX Linux, KDE neon, elementary OS, EndeavourOS, Garuda Linux, CachyOS, Bazzite, SteamOS, Parrot OS, Deepin, Tails, Qubes OS, Rocky Linux, AlmaLinux, Oracle Linux, Solus, Puppy Linux, Peppermint OS, antiX, Nobara Linux, Clear Linux, PCLinuxOS, Alpine, Gentoo, openSUSE, RHEL, CentOS, Linux Mint** | **macOS** (Apple Silicon M1/M2/M3/M4 & Intel AMD64) | **Windows 11 & 10** (Windows Terminal, PowerShell, CMD) | **FreeBSD, OpenBSD, NetBSD** |
 
 ---
 
@@ -62,7 +86,7 @@
 ```
 ╭────────────────────────────────────────────────────────╮
 │   KernelView Go - System Fetch & Live Dashboard        │
-│   Version: v1.3.0                                      │
+│   Version: v1.3.1                                      │
 ╰────────────────────────────────────────────────────────╯
 
 USAGE:
@@ -143,15 +167,15 @@ irm https://raw.githubusercontent.com/codedbysoumyajit/KernelView-Go/main/instal
 
 ### 📦 Pre-Built Binaries
 Download pre-compiled release archives directly from the [GitHub Releases](https://github.com/codedbysoumyajit/KernelView-Go/releases) page:
-* `kernelview_1.3.0_linux_amd64.tar.gz`
-* `kernelview_1.3.0_linux_arm64.tar.gz`
-* `kernelview_1.3.0_darwin_arm64.tar.gz` (Apple Silicon M-series)
-* `kernelview_1.3.0_darwin_amd64.tar.gz` (Intel Mac)
-* `kernelview_1.3.0_windows_amd64.zip`
-* `kernelview_1.3.0_windows_arm64.zip`
-* `kernelview_1.3.0_freebsd_amd64.tar.gz`
-* `kernelview_1.3.0_openbsd_amd64.tar.gz`
-* `kernelview_1.3.0_netbsd_amd64.tar.gz`
+* `kernelview_1.3.1_linux_amd64.tar.gz`
+* `kernelview_1.3.1_linux_arm64.tar.gz`
+* `kernelview_1.3.1_darwin_arm64.tar.gz` (Apple Silicon M-series)
+* `kernelview_1.3.1_darwin_amd64.tar.gz` (Intel Mac)
+* `kernelview_1.3.1_windows_amd64.zip`
+* `kernelview_1.3.1_windows_arm64.zip`
+* `kernelview_1.3.1_freebsd_amd64.tar.gz`
+* `kernelview_1.3.1_openbsd_amd64.tar.gz`
+* `kernelview_1.3.1_netbsd_amd64.tar.gz`
 
 ---
 

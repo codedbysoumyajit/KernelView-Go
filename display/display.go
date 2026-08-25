@@ -135,6 +135,54 @@ func getDistroKey() string {
 				return "manjaro"
 			case "arch":
 				return "arch"
+			case "endeavouros":
+				return "endeavouros"
+			case "garuda":
+				return "garuda"
+			case "cachyos":
+				return "cachyos"
+			case "bazzite":
+				return "bazzite"
+			case "steamos":
+				return "steamos"
+			case "nobara":
+				return "nobara"
+			case "kali":
+				return "kali"
+			case "parrot":
+				return "parrot"
+			case "zorin":
+				return "zorin"
+			case "mx", "mx-linux":
+				return "mx"
+			case "neon", "kdeneon":
+				return "neon"
+			case "elementary":
+				return "elementary"
+			case "deepin":
+				return "deepin"
+			case "tails":
+				return "tails"
+			case "qubes":
+				return "qubes"
+			case "rocky", "rockylinux":
+				return "rocky"
+			case "almalinux", "alma":
+				return "almalinux"
+			case "ol", "oracle":
+				return "oracle"
+			case "solus":
+				return "solus"
+			case "puppy":
+				return "puppy"
+			case "peppermint":
+				return "peppermint"
+			case "antix":
+				return "antix"
+			case "clear-linux-os", "clearlinux", "clear":
+				return "clearlinux"
+			case "pclinuxos":
+				return "pclinuxos"
 			case "pop":
 				return "pop"
 			case "nixos":
@@ -166,6 +214,78 @@ func getDistroKey() string {
 			if strings.Contains(combined, "manjaro") {
 				return "manjaro"
 			}
+			if strings.Contains(combined, "endeavouros") || strings.Contains(combined, "endeavour") {
+				return "endeavouros"
+			}
+			if strings.Contains(combined, "garuda") {
+				return "garuda"
+			}
+			if strings.Contains(combined, "cachyos") {
+				return "cachyos"
+			}
+			if strings.Contains(combined, "bazzite") {
+				return "bazzite"
+			}
+			if strings.Contains(combined, "steamos") || strings.Contains(combined, "steam") {
+				return "steamos"
+			}
+			if strings.Contains(combined, "nobara") {
+				return "nobara"
+			}
+			if strings.Contains(combined, "kali") {
+				return "kali"
+			}
+			if strings.Contains(combined, "parrot") {
+				return "parrot"
+			}
+			if strings.Contains(combined, "zorin") {
+				return "zorin"
+			}
+			if strings.Contains(combined, "mx linux") || strings.Contains(combined, "mx-linux") || strings.Contains(combined, "mx") {
+				return "mx"
+			}
+			if strings.Contains(combined, "kde neon") || strings.Contains(combined, "kdeneon") || strings.Contains(combined, "neon") {
+				return "neon"
+			}
+			if strings.Contains(combined, "elementary") {
+				return "elementary"
+			}
+			if strings.Contains(combined, "deepin") {
+				return "deepin"
+			}
+			if strings.Contains(combined, "tails") {
+				return "tails"
+			}
+			if strings.Contains(combined, "qubes") {
+				return "qubes"
+			}
+			if strings.Contains(combined, "rocky") {
+				return "rocky"
+			}
+			if strings.Contains(combined, "almalinux") || strings.Contains(combined, "alma") {
+				return "almalinux"
+			}
+			if strings.Contains(combined, "oracle") {
+				return "oracle"
+			}
+			if strings.Contains(combined, "solus") {
+				return "solus"
+			}
+			if strings.Contains(combined, "puppy") {
+				return "puppy"
+			}
+			if strings.Contains(combined, "peppermint") {
+				return "peppermint"
+			}
+			if strings.Contains(combined, "antix") {
+				return "antix"
+			}
+			if strings.Contains(combined, "clear-linux") || strings.Contains(combined, "clearlinux") {
+				return "clearlinux"
+			}
+			if strings.Contains(combined, "pclinuxos") {
+				return "pclinuxos"
+			}
 			if strings.Contains(combined, "pop!_os") || strings.Contains(combined, "pop-os") || strings.Contains(combined, "pop_os") {
 				return "pop"
 			}
@@ -175,7 +295,7 @@ func getDistroKey() string {
 			if strings.Contains(combined, "void") {
 				return "void"
 			}
-			if strings.Contains(combined, "arch") || strings.Contains(combined, "endeavouros") {
+			if strings.Contains(combined, "arch") {
 				return "arch"
 			}
 			if strings.Contains(combined, "ubuntu") {
@@ -233,6 +353,198 @@ func GetThemeForDistro(distroKey string, noColor bool) Theme {
 			Key:      "\033[1;36m",
 			Value:    valColor,
 			Accent:   "\033[1;36m",
+			Reset:    reset,
+		}
+	case "endeavouros":
+		return Theme{
+			Category: "\033[1;38;5;127m", // Bold Endeavour Purple
+			Key:      "\033[1;38;5;127m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;127m",
+			Reset:    reset,
+		}
+	case "garuda":
+		return Theme{
+			Category: "\033[1;38;5;202m", // Bold Garuda Orange-Red
+			Key:      "\033[1;38;5;202m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;202m",
+			Reset:    reset,
+		}
+	case "cachyos":
+		return Theme{
+			Category: "\033[1;38;5;35m", // Bold CachyOS Emerald Green
+			Key:      "\033[1;38;5;35m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;35m",
+			Reset:    reset,
+		}
+	case "bazzite":
+		return Theme{
+			Category: "\033[1;38;5;135m", // Bold Bazzite Purple
+			Key:      "\033[1;38;5;135m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;135m",
+			Reset:    reset,
+		}
+	case "steamos":
+		return Theme{
+			Category: "\033[1;34m", // Bold Steam Blue
+			Key:      "\033[1;34m",
+			Value:    valColor,
+			Accent:   "\033[1;34m",
+			Reset:    reset,
+		}
+	case "nobara":
+		return Theme{
+			Category: "\033[1;38;5;141m", // Bold Nobara Purple
+			Key:      "\033[1;38;5;141m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;141m",
+			Reset:    reset,
+		}
+	case "kali":
+		return Theme{
+			Category: "\033[1;38;5;33m", // Bold Kali Blue
+			Key:      "\033[1;38;5;33m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;33m",
+			Reset:    reset,
+		}
+	case "parrot":
+		return Theme{
+			Category: "\033[1;38;5;44m", // Bold Parrot Turquoise
+			Key:      "\033[1;38;5;44m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;44m",
+			Reset:    reset,
+		}
+	case "zorin":
+		return Theme{
+			Category: "\033[1;38;5;39m", // Bold Zorin Light Blue
+			Key:      "\033[1;38;5;39m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;39m",
+			Reset:    reset,
+		}
+	case "mx":
+		return Theme{
+			Category: "\033[1;37m", // Bold MX Gray/White
+			Key:      "\033[1;37m",
+			Value:    valColor,
+			Accent:   "\033[1;37m",
+			Reset:    reset,
+		}
+	case "neon":
+		return Theme{
+			Category: "\033[1;38;5;45m", // Bold KDE Neon Bright Cyan
+			Key:      "\033[1;38;5;45m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;45m",
+			Reset:    reset,
+		}
+	case "elementary":
+		return Theme{
+			Category: "\033[1;38;5;69m", // Bold elementary Sky Blue
+			Key:      "\033[1;38;5;69m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;69m",
+			Reset:    reset,
+		}
+	case "deepin":
+		return Theme{
+			Category: "\033[1;38;5;38m", // Bold Deepin Cyan
+			Key:      "\033[1;38;5;38m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;38m",
+			Reset:    reset,
+		}
+	case "tails":
+		return Theme{
+			Category: "\033[1;38;5;97m", // Bold Tails Purple
+			Key:      "\033[1;38;5;97m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;97m",
+			Reset:    reset,
+		}
+	case "qubes":
+		return Theme{
+			Category: "\033[1;38;5;33m", // Bold Qubes Blue
+			Key:      "\033[1;38;5;33m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;33m",
+			Reset:    reset,
+		}
+	case "rocky":
+		return Theme{
+			Category: "\033[1;38;5;34m", // Bold Rocky Forest Green
+			Key:      "\033[1;38;5;34m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;34m",
+			Reset:    reset,
+		}
+	case "almalinux":
+		return Theme{
+			Category: "\033[1;38;5;214m", // Bold AlmaLinux Amber
+			Key:      "\033[1;38;5;214m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;214m",
+			Reset:    reset,
+		}
+	case "oracle":
+		return Theme{
+			Category: "\033[1;31m", // Bold Oracle Red
+			Key:      "\033[1;31m",
+			Value:    valColor,
+			Accent:   "\033[1;31m",
+			Reset:    reset,
+		}
+	case "solus":
+		return Theme{
+			Category: "\033[1;38;5;67m", // Bold Solus Slate Blue
+			Key:      "\033[1;38;5;67m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;67m",
+			Reset:    reset,
+		}
+	case "puppy":
+		return Theme{
+			Category: "\033[1;38;5;75m", // Bold Puppy Light Steel Blue
+			Key:      "\033[1;38;5;75m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;75m",
+			Reset:    reset,
+		}
+	case "peppermint":
+		return Theme{
+			Category: "\033[1;38;5;160m", // Bold Peppermint Crimson
+			Key:      "\033[1;38;5;160m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;160m",
+			Reset:    reset,
+		}
+	case "antix":
+		return Theme{
+			Category: "\033[1;31m", // Bold antiX Red
+			Key:      "\033[1;31m",
+			Value:    valColor,
+			Accent:   "\033[1;31m",
+			Reset:    reset,
+		}
+	case "clearlinux":
+		return Theme{
+			Category: "\033[1;38;5;39m", // Bold Clear Linux Sky Blue
+			Key:      "\033[1;38;5;39m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;39m",
+			Reset:    reset,
+		}
+	case "pclinuxos":
+		return Theme{
+			Category: "\033[1;34m", // Bold PCLinuxOS Blue
+			Key:      "\033[1;34m",
+			Value:    valColor,
+			Accent:   "\033[1;34m",
 			Reset:    reset,
 		}
 	case "ubuntu":
