@@ -8,7 +8,7 @@ Write-Host "Fetching latest release version..."
 try {
     $tag = (Invoke-RestMethod -Uri $releases).tag_name
 } catch {
-    $tag = "v1.3.1" # Fallback
+    $tag = "v1.3.2" # Fallback
 }
 $tagClean = $tag.TrimStart('v')
 

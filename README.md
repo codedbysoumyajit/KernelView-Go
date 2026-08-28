@@ -86,7 +86,7 @@
 ```
 ╭────────────────────────────────────────────────────────╮
 │   KernelView Go - System Fetch & Live Dashboard        │
-│   Version: v1.3.1                                      │
+│   Version: v1.3.2                                      │
 ╰────────────────────────────────────────────────────────╯
 
 USAGE:
@@ -165,17 +165,27 @@ irm https://raw.githubusercontent.com/codedbysoumyajit/KernelView-Go/main/instal
 
 ---
 
+### 📦 Package Managers
+
+#### Fedora Linux (COPR)
+```bash
+sudo dnf copr enable codedbysoumyajit/kernelview
+sudo dnf install kernelview
+```
+
+---
+
 ### 📦 Pre-Built Binaries
 Download pre-compiled release archives directly from the [GitHub Releases](https://github.com/codedbysoumyajit/KernelView-Go/releases) page:
-* `kernelview_1.3.1_linux_amd64.tar.gz`
-* `kernelview_1.3.1_linux_arm64.tar.gz`
-* `kernelview_1.3.1_darwin_arm64.tar.gz` (Apple Silicon M-series)
-* `kernelview_1.3.1_darwin_amd64.tar.gz` (Intel Mac)
-* `kernelview_1.3.1_windows_amd64.zip`
-* `kernelview_1.3.1_windows_arm64.zip`
-* `kernelview_1.3.1_freebsd_amd64.tar.gz`
-* `kernelview_1.3.1_openbsd_amd64.tar.gz`
-* `kernelview_1.3.1_netbsd_amd64.tar.gz`
+* `kernelview_1.3.2_linux_amd64.tar.gz`
+* `kernelview_1.3.2_linux_arm64.tar.gz`
+* `kernelview_1.3.2_darwin_arm64.tar.gz` (Apple Silicon M-series)
+* `kernelview_1.3.2_darwin_amd64.tar.gz` (Intel Mac)
+* `kernelview_1.3.2_windows_amd64.zip`
+* `kernelview_1.3.2_windows_arm64.zip`
+* `kernelview_1.3.2_freebsd_amd64.tar.gz`
+* `kernelview_1.3.2_openbsd_amd64.tar.gz`
+* `kernelview_1.3.2_netbsd_amd64.tar.gz`
 
 ---
 

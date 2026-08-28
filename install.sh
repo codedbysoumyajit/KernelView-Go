@@ -23,7 +23,7 @@ esac
 echo "Fetching latest release tag..."
 LATEST_TAG=$(curl -s https://api.github.com/repos/codedbysoumyajit/KernelView-Go/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
 if [ -z "$LATEST_TAG" ]; then
-    LATEST_TAG="v1.3.1" # Fallback
+    LATEST_TAG="v1.3.2" # Fallback
 fi
 
 TAG_CLEAN=$(echo "$LATEST_TAG" | sed 's/^v//')
