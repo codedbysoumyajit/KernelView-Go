@@ -28,8 +28,8 @@ dependencies.
 
 %build
 export CGO_ENABLED=0
-export GOFLAGS="-buildmode=pie -trimpath"
-go build -ldflags="-s -w -X main.version=v%{version}" -o bin/%{name} .
+export GOFLAGS="-buildmode=pie -trimpath -mod=vendor"
+go build -mod=vendor -ldflags="-s -w -X main.version=v%{version}" -o bin/%{name} .
 
 %install
 install -D -p -m 0755 bin/%{name} %{buildroot}%{_bindir}/%{name}

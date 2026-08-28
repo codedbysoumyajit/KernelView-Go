@@ -12,8 +12,6 @@ KernelView-Go
 
 # Go Packages & Dependencies
 # Generally 'go.mod' and 'go.sum' SHOULD be committed.
-# Ignore vendor directory if you aren't committing vendored dependencies.
-vendor/
 
 # Go build cache (if created within project)
 bin/
