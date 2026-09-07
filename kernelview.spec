@@ -1,5 +1,5 @@
 Name:           kernelview
-Version:        1.3.2
+Version:        1.3.3
 Release:        1%{?dist}
 Summary:        Ultra-fast terminal system information fetcher and real-time telemetry dashboard
 
@@ -40,5 +40,8 @@ install -D -p -m 0755 bin/%{name} %{buildroot}%{_bindir}/%{name}
 %{_bindir}/%{name}
 
 %changelog
-* Fri Aug 28 2026 Soumyajit Das <codedbysoumyajit@gmail.com> - 1.3.2-1
+* Mon Sep 07 2026 Soumyajit Das <sd490405@gmail.com> - 1.3.3-1
+- Release KernelView Go v1.3.3 with Ubuntu PPA support
+
+* Fri Aug 28 2026 Soumyajit Das <sd490405@gmail.com> - 1.3.2-1
 - Release KernelView Go v1.3.2 with Fedora COPR packaging support

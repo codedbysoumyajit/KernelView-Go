@@ -1,0 +1,5 @@
+kernelview (1.3.3-1~ubuntu24.04.1) noble; urgency=medium
+
+  * Initial Ubuntu PPA release for KernelView Go v1.3.3.
+
+ -- Soumyajit Das <sd490405@gmail.com>  Mon, 07 Sep 2026 16:10:00 +0530

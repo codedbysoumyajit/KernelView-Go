@@ -1,0 +1,25 @@
+#!/usr/bin/make -f
+export DH_VERBOSE = 1
+export CGO_ENABLED = 0
+export GOFLAGS = -mod=vendor -trimpath
+export GOTOOLCHAIN = local
+
+# Check for go-1.24 toolchain path on Ubuntu Noble
+ifneq ($(wildcard /usr/lib/go-1.24/bin/go),)
+export PATH := /usr/lib/go-1.24/bin:$(PATH)
+endif
+
+include /usr/share/dpkg/pkg-info.mk
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	go build -mod=vendor -trimpath -ldflags="-s -w -X main.version=v$(DEB_VERSION_UPSTREAM)" -o bin/kernelview .
+
+override_dh_auto_test:
+	# No upstream tests to run during build
+
+override_dh_auto_clean:
+	rm -rf bin
+	dh_auto_clean

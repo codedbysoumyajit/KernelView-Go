@@ -1,0 +1,21 @@
+Source: kernelview
+Section: utils
+Priority: optional
+Maintainer: Soumyajit Das <sd490405@gmail.com>
+XSBC-Original-Maintainer: Soumyajit Das <sd490405@gmail.com>
+Build-Depends: debhelper-compat (= 13), golang-1.24-go | golang-any (>= 1.24)
+Standards-Version: 4.6.2
+Homepage: https://github.com/codedbysoumyajit/KernelView-Go
+Vcs-Git: https://github.com/codedbysoumyajit/KernelView-Go.git
+Vcs-Browser: https://github.com/codedbysoumyajit/KernelView-Go
+Rules-Requires-Root: no
+
+Package: kernelview
+Architecture: any
+Depends: ${misc:Depends}
+Description: Ultra-fast terminal system fetcher and real-time telemetry dashboard
+ KernelView Go is an ultra-fast, aesthetic system information fetcher and
+ real-time terminal telemetry dashboard written in pure Go. Engineered for
+ maximum efficiency, sub-millisecond data gathering, and zero runtime
+ dependencies, it delivers instant hardware telemetry, distro-branded ASCII
+ aesthetics, and an interactive multi-tab live TUI dashboard.
