@@ -7,9 +7,6 @@
   <img src="https://img.shields.io/badge/Language-Go-00ADD8?style=for-the-badge&logo=go" alt="Go" />
   <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="MIT License" />
   <img src="https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows%20%7C%20BSD-blue?style=for-the-badge" alt="Platforms" />
-  <a href="https://goreportcard.com/report/github.com/codedbysoumyajit/KernelView-Go">
-    <img src="https://goreportcard.com/badge/github.com/codedbysoumyajit/KernelView-Go?style=for-the-badge" alt="Go Report Card" />
-  </a>
   <a href="https://github.com/codedbysoumyajit/KernelView-Go/releases">
     <img src="https://img.shields.io/github/v/release/codedbysoumyajit/KernelView-Go?style=for-the-badge&label=latest%20release" alt="Latest Release" />
   </a>
@@ -167,7 +164,7 @@ irm https://raw.githubusercontent.com/codedbysoumyajit/KernelView-Go/main/instal
 
 ### 📦 Package Managers
 
-#### Ubuntu & Linux Mint (Launchpad PPA)
+#### Ubuntu & Linux Mint (Launchpad PPA) (⚠️ Under Process, doesn't work yet)
 ```bash
 sudo add-apt-repository ppa:codedbysoumyajit/kernelview
 sudo apt update
