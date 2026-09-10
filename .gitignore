@@ -16,6 +16,8 @@ KernelView-Go
 # Go build cache (if created within project)
 bin/
 pkg/
+build-deb/
+*.sftp
 
 # Test coverage files
 *.cover
