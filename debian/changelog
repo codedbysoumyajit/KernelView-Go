@@ -1,5 +1,12 @@
+kernelview (1.3.3-1~ubuntu24.04.2) noble; urgency=medium
+
+  * Fix build cache failure in Launchpad sbuild by redirecting GOCACHE and HOME to /tmp.
+
+ -- Soumyajit Das <sd490405@gmail.com>  Sat, 12 Sep 2026 14:26:19 +0530
+
 kernelview (1.3.3-1~ubuntu24.04.1) noble; urgency=medium
 
   * Initial Ubuntu PPA release for KernelView Go v1.3.3.
 
  -- Soumyajit Das <sd490405@gmail.com>  Mon, 07 Sep 2026 16:10:00 +0530
+
