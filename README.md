@@ -164,7 +164,7 @@ irm https://raw.githubusercontent.com/codedbysoumyajit/KernelView-Go/main/instal
 
 ### 📦 Package Managers
 
-#### Ubuntu & Linux Mint (Launchpad PPA) (⚠️ Under Process, doesn't work yet)
+#### Ubuntu & Linux Mint (Launchpad PPA)
 ```bash
 sudo add-apt-repository ppa:codedbysoumyajit/kernelview
 sudo apt update

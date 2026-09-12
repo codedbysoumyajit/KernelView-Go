@@ -52,3 +52,4 @@ Thumbs.db
 !.env.example
 
 # Add any other project-specific files you don't want to track below this line
+scripts/
