@@ -23,6 +23,12 @@ jobs:
           go-version: 'stable'
           cache: true
 
+      - name: Clean up existing release if retagged
+        run: |
+          gh release delete "${{ github.ref_name }}" --yes || true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
         with:
@@ -31,3 +37,4 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
