@@ -2147,28 +2147,56 @@ func GetNetworkDetails() (*NetworkInfo, error) {
 	return info, nil
 }
 
+// DiskPartitionInfo holds filesystem mount details (Exported)
+type DiskPartitionInfo struct {
+	Mountpoint  string
+	Device      string
+	Fstype      string
+	Total       uint64
+	Used        uint64
+	Free        uint64
+	UsedPercent float64
+}
+
+// DiskDeviceIO holds per-device IO metrics (Exported)
+type DiskDeviceIO struct {
+	Name       string
+	ReadSpeed  float64 // bytes/sec
+	WriteSpeed float64 // bytes/sec
+	ReadIOPS   float64 // ops/sec
+	WriteIOPS  float64 // ops/sec
+	ReadTotal  uint64  // bytes
+	WriteTotal uint64  // bytes
+}
+
 // LiveMetrics holds real-time system stats (Exported)
 type LiveMetrics struct {
-	Uptime      string
-	CPUUsage    float64
-	CPUCores    []float64 // Per-core CPU percentages (Exported)
-	RAMUsed     uint64
-	RAMTotal    uint64
-	RAMPercent  float64
-	SwapUsed    uint64
-	SwapTotal   uint64
-	SwapPercent float64
-	DiskUsed    uint64
-	DiskTotal   uint64
-	DiskPercent float64
-	Temperature float64
-	NetRxSpeed  float64 // bytes/sec
-	NetTxSpeed  float64 // bytes/sec
-	NetRxTotal  uint64  // bytes
-	NetTxTotal  uint64  // bytes
-	NetIface    string
-	Processes   []ProcessInfo
-	GPUMetrics  LiveGPUMetrics // GPU telemetry details (Exported)
+	Uptime         string
+	CPUUsage       float64
+	CPUCores       []float64 // Per-core CPU percentages (Exported)
+	RAMUsed        uint64
+	RAMTotal       uint64
+	RAMPercent     float64
+	SwapUsed       uint64
+	SwapTotal      uint64
+	SwapPercent    float64
+	DiskUsed       uint64
+	DiskTotal      uint64
+	DiskPercent    float64
+	DiskReadSpeed  float64 // bytes/sec overall
+	DiskWriteSpeed float64 // bytes/sec overall
+	DiskReadTotal  uint64  // bytes overall
+	DiskWriteTotal uint64  // bytes overall
+	DiskPartitions []DiskPartitionInfo
+	DiskDevices    []DiskDeviceIO
+	Temperature    float64
+	NetRxSpeed     float64 // bytes/sec
+	NetTxSpeed     float64 // bytes/sec
+	NetRxTotal     uint64  // bytes
+	NetTxTotal     uint64  // bytes
+	NetIface       string
+	Processes      []ProcessInfo
+	GPUMetrics     LiveGPUMetrics // GPU telemetry details (Exported)
 }
 
 // LiveTracker tracks metrics across real-time updates (Exported)
@@ -2190,6 +2218,16 @@ type LiveTracker struct {
 	cachedDiskTotal   uint64
 	cachedDiskPercent float64
 	lastDiskUpdate    time.Time
+
+	// Cached disk partitions
+	cachedPartitions     []DiskPartitionInfo
+	lastPartitionsUpdate time.Time
+
+	// Disk I/O tracking
+	prevDiskIOCounters map[string]disk.IOCountersStat
+	prevDiskTime       time.Time
+	smoothedDiskRead   float64
+	smoothedDiskWrite  float64
 
 	// Cached temperature
 	cachedTemp     float64
@@ -2218,8 +2256,9 @@ func NewLiveTracker() *LiveTracker {
 		bTime = time.Unix(int64(h.BootTime), 0)
 	}
 	return &LiveTracker{
-		procsMap: make(map[int32]*process.Process),
-		bootTime: bTime,
+		procsMap:           make(map[int32]*process.Process),
+		prevDiskIOCounters: make(map[string]disk.IOCountersStat),
+		bootTime:           bTime,
 	}
 }
 
@@ -2477,6 +2516,168 @@ func (lt *LiveTracker) GetMetrics() (*LiveMetrics, error) {
 		go lt.scanProcessesAsync()
 	}
 	metrics.Processes = lt.cachedProcesses
+
+	// 9. Disk I/O & Partitions
+	if time.Since(lt.lastPartitionsUpdate) >= 5*time.Second || lt.lastPartitionsUpdate.IsZero() {
+		parts, err := disk.Partitions(false)
+		if err == nil {
+			var pList []DiskPartitionInfo
+			seenMounts := make(map[string]bool)
+			for _, p := range parts {
+				if seenMounts[p.Mountpoint] {
+					continue
+				}
+				if strings.HasPrefix(p.Mountpoint, "/proc") ||
+					strings.HasPrefix(p.Mountpoint, "/sys") ||
+					strings.HasPrefix(p.Mountpoint, "/dev") ||
+					p.Fstype == "squashfs" {
+					continue
+				}
+				u, err := disk.Usage(p.Mountpoint)
+				if err == nil && u.Total > 0 {
+					pList = append(pList, DiskPartitionInfo{
+						Mountpoint:  p.Mountpoint,
+						Device:      p.Device,
+						Fstype:      p.Fstype,
+						Total:       u.Total,
+						Used:        u.Used,
+						Free:        u.Free,
+						UsedPercent: u.UsedPercent,
+					})
+					seenMounts[p.Mountpoint] = true
+				}
+			}
+			sort.Slice(pList, func(i, j int) bool {
+				if pList[i].Mountpoint == "/" {
+					return true
+				}
+				if pList[j].Mountpoint == "/" {
+					return false
+				}
+				return pList[i].Mountpoint < pList[j].Mountpoint
+			})
+			lt.cachedPartitions = pList
+			lt.lastPartitionsUpdate = time.Now()
+		}
+	}
+	metrics.DiskPartitions = lt.cachedPartitions
+
+	ioCounters, err := disk.IOCounters()
+	if err == nil && len(ioCounters) > 0 {
+		var devList []DiskDeviceIO
+		nowDisk := time.Now()
+		elapsedDisk := 0.0
+		if !lt.prevDiskTime.IsZero() {
+			elapsedDisk = nowDisk.Sub(lt.prevDiskTime).Seconds()
+		}
+
+		var totalReadBytes, totalWriteBytes uint64
+		var totalReadSpeed, totalWriteSpeed float64
+
+		isBaseDisk := func(name string) bool {
+			if strings.HasPrefix(name, "loop") || strings.HasPrefix(name, "ram") {
+				return false
+			}
+			if strings.HasPrefix(name, "sd") || strings.HasPrefix(name, "vd") || strings.HasPrefix(name, "xvd") || strings.HasPrefix(name, "hd") {
+				lastChar := name[len(name)-1]
+				return lastChar < '0' || lastChar > '9'
+			}
+			if strings.HasPrefix(name, "nvme") {
+				return !strings.Contains(name, "p")
+			}
+			if strings.HasPrefix(name, "mmcblk") {
+				return !strings.Contains(name, "p")
+			}
+			return true
+		}
+
+		baseDiskCount := 0
+		for name := range ioCounters {
+			if isBaseDisk(name) {
+				baseDiskCount++
+			}
+		}
+
+		var devNames []string
+		for name := range ioCounters {
+			if strings.HasPrefix(name, "loop") || strings.HasPrefix(name, "ram") {
+				continue
+			}
+			devNames = append(devNames, name)
+		}
+		sort.Strings(devNames)
+
+		for _, name := range devNames {
+			curr := ioCounters[name]
+			var rSpeed, wSpeed, rIOPS, wIOPS float64
+			if prev, exists := lt.prevDiskIOCounters[name]; exists && elapsedDisk > 0 {
+				if curr.ReadBytes >= prev.ReadBytes {
+					rSpeed = float64(curr.ReadBytes-prev.ReadBytes) / elapsedDisk
+				}
+				if curr.WriteBytes >= prev.WriteBytes {
+					wSpeed = float64(curr.WriteBytes-prev.WriteBytes) / elapsedDisk
+				}
+				if curr.ReadCount >= prev.ReadCount {
+					rIOPS = float64(curr.ReadCount-prev.ReadCount) / elapsedDisk
+				}
+				if curr.WriteCount >= prev.WriteCount {
+					wIOPS = float64(curr.WriteCount-prev.WriteCount) / elapsedDisk
+				}
+			}
+
+			devList = append(devList, DiskDeviceIO{
+				Name:       name,
+				ReadSpeed:  rSpeed,
+				WriteSpeed: wSpeed,
+				ReadIOPS:   rIOPS,
+				WriteIOPS:  wIOPS,
+				ReadTotal:  curr.ReadBytes,
+				WriteTotal: curr.WriteBytes,
+			})
+
+			if baseDiskCount == 0 || isBaseDisk(name) {
+				totalReadBytes += curr.ReadBytes
+				totalWriteBytes += curr.WriteBytes
+				totalReadSpeed += rSpeed
+				totalWriteSpeed += wSpeed
+			}
+		}
+
+		sort.Slice(devList, func(i, j int) bool {
+			baseI := isBaseDisk(devList[i].Name)
+			baseJ := isBaseDisk(devList[j].Name)
+			if baseI != baseJ {
+				return baseI
+			}
+			actI := devList[i].ReadSpeed + devList[i].WriteSpeed
+			actJ := devList[j].ReadSpeed + devList[j].WriteSpeed
+			if actI != actJ {
+				return actI > actJ
+			}
+			return devList[i].Name < devList[j].Name
+		})
+
+		if lt.smoothedDiskRead == 0 {
+			lt.smoothedDiskRead = totalReadSpeed
+		} else {
+			lt.smoothedDiskRead = 0.50*totalReadSpeed + 0.50*lt.smoothedDiskRead
+		}
+
+		if lt.smoothedDiskWrite == 0 {
+			lt.smoothedDiskWrite = totalWriteSpeed
+		} else {
+			lt.smoothedDiskWrite = 0.50*totalWriteSpeed + 0.50*lt.smoothedDiskWrite
+		}
+
+		metrics.DiskReadSpeed = lt.smoothedDiskRead
+		metrics.DiskWriteSpeed = lt.smoothedDiskWrite
+		metrics.DiskReadTotal = totalReadBytes
+		metrics.DiskWriteTotal = totalWriteBytes
+		metrics.DiskDevices = devList
+
+		lt.prevDiskIOCounters = ioCounters
+		lt.prevDiskTime = nowDisk
+	}
 
 	return metrics, nil
 }

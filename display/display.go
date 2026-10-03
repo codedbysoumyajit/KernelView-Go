@@ -1350,8 +1350,8 @@ func PrintHelp(version string, noColor bool) {
 
 	// Section 5: TUI Interactive Keys
 	fmt.Printf("%sTUI INTERACTIVE KEYS:%s\n", theme.Accent, theme.Reset)
-	fmt.Printf("  %s[1]%s Dashboard Tab   %s[2]%s Processes Tab   %s[3]%s Network Tab   %s[4]%s CPU Cores Tab   %s[Q]%s Quit\n\n",
-		theme.Key, theme.Reset, theme.Key, theme.Reset, theme.Key, theme.Reset, theme.Key, theme.Reset, theme.Key, theme.Reset)
+	fmt.Printf("  %s[1]%s Dashboard Tab   %s[2]%s Processes Tab   %s[3]%s Network Tab   %s[4]%s CPU Cores Tab   %s[5]%s Disk/IO Tab   %s[Q]%s Quit\n\n",
+		theme.Key, theme.Reset, theme.Key, theme.Reset, theme.Key, theme.Reset, theme.Key, theme.Reset, theme.Key, theme.Reset, theme.Key, theme.Reset)
 
 	// Section 6: Examples
 	fmt.Printf("%sEXAMPLES:%s\n", theme.Accent, theme.Reset)

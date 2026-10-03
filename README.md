@@ -56,6 +56,7 @@
   * `[2] Processes`: Interactive, real-time process list sorted dynamically by CPU and memory consumption.
   * `[3] Network`: Live per-interface network throughput, transfer metrics, and bandwidth meters.
   * `[4] CPU Cores`: Dedicated per-core frequency and utilization telemetry in a responsive multi-column grid.
+  * `[5] Disk / IO`: Real-time disk I/O rates, per-device throughput/IOPS, and mounted filesystem capacity meters.
 
 ### 🎮 3. GPU & Graphics API Telemetry (`-g`, `--gpu`)
 * **Dual-Architecture Support**: Concurrently detects integrated graphics (Intel Iris/UHD, AMD Radeon) and dedicated GPUs (NVIDIA, AMD, Apple Silicon).
@@ -106,7 +107,7 @@ INFO FLAGS:
   -h, --help         Print help menu
 
 TUI INTERACTIVE KEYS:
-  [1] Dashboard Tab   [2] Processes Tab   [3] Network Tab   [4] CPU Cores Tab   [Q] Quit
+  [1] Dashboard Tab   [2] Processes Tab   [3] Network Tab   [4] CPU Cores Tab   [5] Disk/IO Tab   [Q] Quit
 ```
 
 ### Example Commands

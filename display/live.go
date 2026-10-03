@@ -28,14 +28,16 @@ type Event struct {
 }
 
 type LiveDisplay struct {
-	tracker    *gather.LiveTracker
-	static     *gather.SystemInfo
-	isFast     bool
-	tab        string
-	termWidth  int
-	termHeight int
-	peakRx     float64
-	peakTx     float64
+	tracker       *gather.LiveTracker
+	static        *gather.SystemInfo
+	isFast        bool
+	tab           string
+	termWidth     int
+	termHeight    int
+	peakRx        float64
+	peakTx        float64
+	peakDiskRead  float64
+	peakDiskWrite float64
 }
 
 // StartLiveDashboard launches the clean, aesthetic live dashboard
@@ -150,6 +152,9 @@ func StartLiveDashboard(isFast bool) {
 			case '4', 'c', 'C':
 				ld.tab = "cores"
 				fmt.Print("\033[H\033[2J")
+			case '5', 'i', 'I', 'k', 'K':
+				ld.tab = "disk"
+				fmt.Print("\033[H\033[2J")
 			}
 		case PackageUpdate:
 			ld.static.Packages = ev.Str
@@ -235,6 +240,12 @@ func (ld *LiveDisplay) render() {
 	if metrics.NetTxSpeed > ld.peakTx {
 		ld.peakTx = metrics.NetTxSpeed
 	}
+	if metrics.DiskReadSpeed > ld.peakDiskRead {
+		ld.peakDiskRead = metrics.DiskReadSpeed
+	}
+	if metrics.DiskWriteSpeed > ld.peakDiskWrite {
+		ld.peakDiskWrite = metrics.DiskWriteSpeed
+	}
 
 	// Move cursor to home (top-left) to redraw cleanly
 	fmt.Print("\033[H")
@@ -256,6 +267,8 @@ func (ld *LiveDisplay) render() {
 		ld.renderNetwork(metrics, theme, availableHeight)
 	case "cores":
 		ld.renderCores(metrics, theme, availableHeight)
+	case "disk":
+		ld.renderDisk(metrics, theme, availableHeight)
 	default:
 		ld.renderDashboard(metrics, theme, availableHeight)
 	}
@@ -313,6 +326,7 @@ func (ld *LiveDisplay) printHeader(theme Theme) int {
 		{"processes", "2. PROCESSES"},
 		{"network", "3. NETWORK"},
 		{"cores", "4. CPU CORES"},
+		{"disk", "5. DISK / IO"},
 	}
 
 	var tabStrs []string
@@ -343,8 +357,9 @@ func (ld *LiveDisplay) printFooter(theme Theme, withLeadingNewline bool) {
 	key2 := fmt.Sprintf("%s\033[1;7m 2 \033[0m", theme.Accent)
 	key3 := fmt.Sprintf("%s\033[1;7m 3 \033[0m", theme.Accent)
 	key4 := fmt.Sprintf("%s\033[1;7m 4 \033[0m", theme.Accent)
+	key5 := fmt.Sprintf("%s\033[1;7m 5 \033[0m", theme.Accent)
 
-	leftPart := fmt.Sprintf(" %s Quit   %s Dashboard   %s Processes   %s Network   %s Cores", keyQ, key1, key2, key3, key4)
+	leftPart := fmt.Sprintf(" %s Quit   %s Dashboard   %s Processes   %s Network   %s Cores   %s Disk/IO", keyQ, key1, key2, key3, key4, key5)
 	rightPart := "\033[90mRefresh: 350ms │ KernelView \033[0m"
 
 	leftLen := visualLen(leftPart)
@@ -788,6 +803,279 @@ func (ld *LiveDisplay) renderCores(metrics *gather.LiveMetrics, theme Theme, ava
 }
 
 // -------------------------------------------------------------
+// Tab 5: Disk / IO (Storage Pools & Real-Time I/O Telemetry)
+// -------------------------------------------------------------
+
+func (ld *LiveDisplay) renderDisk(metrics *gather.LiveMetrics, theme Theme, availableHeight int) {
+	w := ld.termWidth - 2
+	if w < 50 {
+		w = 50
+	}
+
+	if availableHeight >= 16 {
+		ld.renderDiskTwoBoxes(metrics, theme, w, availableHeight)
+	} else {
+		ld.renderDiskCompact(metrics, theme, w, availableHeight)
+	}
+}
+
+func (ld *LiveDisplay) renderDiskTwoBoxes(metrics *gather.LiveMetrics, theme Theme, w int, availableHeight int) {
+	partCount := len(metrics.DiskPartitions)
+	if partCount == 0 {
+		partCount = 1
+	}
+
+	box1H := partCount + 4
+	maxBox1H := availableHeight / 2
+	if box1H > maxBox1H {
+		box1H = maxBox1H
+	}
+	if box1H < 6 {
+		box1H = 6
+	}
+	box2H := availableHeight - box1H
+
+	// --- Box 1: Mounted Filesystems & Storage Pools ---
+	var mountLines []string
+
+	mountW := 12
+	devW := 14
+	fsW := 7
+	totalW := 9
+	usedW := 9
+	freeW := 9
+
+	if w >= 95 {
+		mountW = 14
+		devW = 16
+		fsW = 8
+		totalW = 10
+		usedW = 10
+		freeW = 10
+	}
+
+	contentW := w - 4
+	remW := contentW - (mountW + devW + fsW + totalW + usedW + freeW + 6)
+	barColW := remW
+	if barColW < 14 {
+		barColW = 14
+		if devW > 12 {
+			devW = 12
+		}
+	}
+
+	header1 := padLine(fmt.Sprintf("%sMOUNT%s", theme.Key, theme.Reset), mountW) + " " +
+		padLine(fmt.Sprintf("%sDEVICE%s", theme.Key, theme.Reset), devW) + " " +
+		padLine(fmt.Sprintf("%sTYPE%s", theme.Key, theme.Reset), fsW) + " " +
+		padLeft(fmt.Sprintf("%sTOTAL%s", theme.Key, theme.Reset), totalW) + " " +
+		padLeft(fmt.Sprintf("%sUSED%s", theme.Key, theme.Reset), usedW) + " " +
+		padLeft(fmt.Sprintf("%sFREE%s", theme.Key, theme.Reset), freeW) + " " +
+		padLeft(fmt.Sprintf("%sCAPACITY%s", theme.Key, theme.Reset), barColW)
+	mountLines = append(mountLines, header1)
+	mountLines = append(mountLines, "\033[90m"+strings.Repeat("─", contentW)+theme.Reset)
+
+	maxParts := box1H - 4
+	if maxParts < 1 {
+		maxParts = 1
+	}
+	visibleParts := len(metrics.DiskPartitions)
+	if visibleParts > maxParts {
+		visibleParts = maxParts
+	}
+
+	for i := 0; i < visibleParts; i++ {
+		p := metrics.DiskPartitions[i]
+		cleanBarW := barColW - 8
+		if cleanBarW < 4 {
+			cleanBarW = 4
+		}
+		if cleanBarW > 18 {
+			cleanBarW = 18
+		}
+		barStr := drawCleanBar(p.UsedPercent, cleanBarW)
+
+		mountStr := fmt.Sprintf("\033[38;5;45m%s\033[0m", truncateAnsi(p.Mountpoint, mountW))
+		devStr := fmt.Sprintf("\033[38;5;244m%s\033[0m", truncateAnsi(p.Device, devW))
+		fsStr := p.Fstype
+
+		row := padLine(mountStr, mountW) + " " +
+			padLine(devStr, devW) + " " +
+			padLine(fsStr, fsW) + " " +
+			padLeft(gather.FormatBytes(p.Total), totalW) + " " +
+			padLeft(gather.FormatBytes(p.Used), usedW) + " " +
+			padLeft(gather.FormatBytes(p.Free), freeW) + " " +
+			padLeft(barStr, barColW)
+		mountLines = append(mountLines, row)
+	}
+
+	if len(metrics.DiskPartitions) == 0 {
+		mountLines = append(mountLines, "No mounted partitions found.")
+	}
+
+	box1 := drawBox("◆ Storage Volumes & Mounted Filesystems", mountLines, w, box1H, theme)
+
+	// --- Box 2: Block Devices & Real-Time I/O Activity ---
+	var devLines []string
+
+	devLines = append(devLines, formatKeyVal("Read Speed", fmt.Sprintf("▼ %s/s (Peak: %s/s)", gather.FormatBytes(uint64(metrics.DiskReadSpeed)), gather.FormatBytes(uint64(ld.peakDiskRead))), contentW, theme))
+	devLines = append(devLines, formatKeyVal("Write Speed", fmt.Sprintf("▲ %s/s (Peak: %s/s)", gather.FormatBytes(uint64(metrics.DiskWriteSpeed)), gather.FormatBytes(uint64(ld.peakDiskWrite))), contentW, theme))
+	devLines = append(devLines, formatKeyVal("Total Transferred", fmt.Sprintf("▼ Read: %s   ▲ Write: %s", gather.FormatBytes(metrics.DiskReadTotal), gather.FormatBytes(metrics.DiskWriteTotal)), contentW, theme))
+	if box2H >= 12 {
+		devLines = append(devLines, formatKeyVal("Root Usage (/)", fmt.Sprintf("%s / %s (%s)", gather.FormatBytes(metrics.DiskUsed), gather.FormatBytes(metrics.DiskTotal), drawCleanBar(metrics.DiskPercent, 18)), contentW, theme))
+	}
+	devLines = append(devLines, "")
+
+	dNameW := 12
+	dStateW := 10
+	dSpeedW := 14
+	dIopsW := 11
+	dTotalW := 12
+
+	if w < 90 {
+		dNameW = 10
+		dStateW = 8
+		dSpeedW = 12
+		dIopsW = 9
+		dTotalW = 11
+	}
+
+	showTotals := w >= 80
+
+	var headerParts []string
+	headerParts = append(headerParts, padLine(fmt.Sprintf("%sDEVICE%s", theme.Key, theme.Reset), dNameW))
+	headerParts = append(headerParts, padLine(fmt.Sprintf("%sSTATE%s", theme.Key, theme.Reset), dStateW))
+	headerParts = append(headerParts, padLeft(fmt.Sprintf("%sREAD / SEC%s", theme.Key, theme.Reset), dSpeedW))
+	headerParts = append(headerParts, padLeft(fmt.Sprintf("%sWRITE / SEC%s", theme.Key, theme.Reset), dSpeedW))
+	headerParts = append(headerParts, padLeft(fmt.Sprintf("%sR-IOPS%s", theme.Key, theme.Reset), dIopsW))
+	headerParts = append(headerParts, padLeft(fmt.Sprintf("%sW-IOPS%s", theme.Key, theme.Reset), dIopsW))
+	if showTotals {
+		headerParts = append(headerParts, padLeft(fmt.Sprintf("%sTOTAL READ%s", theme.Key, theme.Reset), dTotalW))
+		headerParts = append(headerParts, padLeft(fmt.Sprintf("%sTOTAL WRITE%s", theme.Key, theme.Reset), dTotalW))
+	}
+	devLines = append(devLines, strings.Join(headerParts, " "))
+	devLines = append(devLines, "\033[90m"+strings.Repeat("─", contentW)+theme.Reset)
+
+	maxDevs := box2H - len(devLines) - 3
+	if maxDevs < 1 {
+		maxDevs = 1
+	}
+	devCount := len(metrics.DiskDevices)
+	if devCount > maxDevs {
+		devCount = maxDevs
+	}
+
+	for i := 0; i < devCount; i++ {
+		d := metrics.DiskDevices[i]
+		isActive := d.ReadSpeed > 0 || d.WriteSpeed > 0
+
+		stateStr := "\033[90mIDLE\033[0m"
+		if isActive {
+			stateStr = "\033[38;5;48mACTIVE\033[0m"
+		}
+
+		var rSpeedStr, wSpeedStr string
+		if d.ReadSpeed > 0 {
+			rSpeedStr = fmt.Sprintf("\033[38;5;48m▼ %s/s\033[0m", gather.FormatBytes(uint64(d.ReadSpeed)))
+		} else {
+			rSpeedStr = "\033[90m0 B/s\033[0m"
+		}
+
+		if d.WriteSpeed > 0 {
+			wSpeedStr = fmt.Sprintf("\033[38;5;220m▲ %s/s\033[0m", gather.FormatBytes(uint64(d.WriteSpeed)))
+		} else {
+			wSpeedStr = "\033[90m0 B/s\033[0m"
+		}
+
+		var rIopsStr, wIopsStr string
+		if d.ReadIOPS > 0 {
+			rIopsStr = fmt.Sprintf("\033[38;5;48m%.0f/s\033[0m", d.ReadIOPS)
+		} else {
+			rIopsStr = "\033[90m0/s\033[0m"
+		}
+
+		if d.WriteIOPS > 0 {
+			wIopsStr = fmt.Sprintf("\033[38;5;220m%.0f/s\033[0m", d.WriteIOPS)
+		} else {
+			wIopsStr = "\033[90m0/s\033[0m"
+		}
+
+		nameStr := fmt.Sprintf("\033[38;5;45m%s\033[0m", truncateAnsi(d.Name, dNameW))
+
+		var rowParts []string
+		rowParts = append(rowParts, padLine(nameStr, dNameW))
+		rowParts = append(rowParts, padLine(stateStr, dStateW))
+		rowParts = append(rowParts, padLeft(rSpeedStr, dSpeedW))
+		rowParts = append(rowParts, padLeft(wSpeedStr, dSpeedW))
+		rowParts = append(rowParts, padLeft(rIopsStr, dIopsW))
+		rowParts = append(rowParts, padLeft(wIopsStr, dIopsW))
+		if showTotals {
+			rowParts = append(rowParts, padLeft(gather.FormatBytes(d.ReadTotal), dTotalW))
+			rowParts = append(rowParts, padLeft(gather.FormatBytes(d.WriteTotal), dTotalW))
+		}
+		devLines = append(devLines, strings.Join(rowParts, " "))
+	}
+
+	if len(metrics.DiskDevices) == 0 {
+		devLines = append(devLines, "No block device I/O counters available.")
+	}
+
+	box2 := drawBox("▲ Block Devices & Real-Time I/O Activity", devLines, w, box2H, theme)
+
+	allRows := append(box1, box2...)
+	for _, l := range allRows {
+		fmt.Printf("%s\033[K\r\n", l)
+	}
+}
+
+func (ld *LiveDisplay) renderDiskCompact(metrics *gather.LiveMetrics, theme Theme, w int, availableHeight int) {
+	contentW := w - 4
+	var lines []string
+
+	lines = append(lines, formatKeyVal("Overall Read", fmt.Sprintf("▼ %s/s (Peak: %s/s)", gather.FormatBytes(uint64(metrics.DiskReadSpeed)), gather.FormatBytes(uint64(ld.peakDiskRead))), contentW, theme))
+	lines = append(lines, formatKeyVal("Overall Write", fmt.Sprintf("▲ %s/s (Peak: %s/s)", gather.FormatBytes(uint64(metrics.DiskWriteSpeed)), gather.FormatBytes(uint64(ld.peakDiskWrite))), contentW, theme))
+	lines = append(lines, formatKeyVal("Root Usage (/)", fmt.Sprintf("%s / %s (%s)", gather.FormatBytes(metrics.DiskUsed), gather.FormatBytes(metrics.DiskTotal), drawCleanBar(metrics.DiskPercent, 14)), contentW, theme))
+	lines = append(lines, "")
+
+	mountW := 12
+	totalW := 10
+	usedW := 10
+	barW := contentW - (mountW + totalW + usedW + 3)
+	if barW < 12 {
+		barW = 12
+	}
+
+	lines = append(lines, padLine(fmt.Sprintf("%sMOUNT%s", theme.Key, theme.Reset), mountW)+" "+
+		padLeft(fmt.Sprintf("%sTOTAL%s", theme.Key, theme.Reset), totalW)+" "+
+		padLeft(fmt.Sprintf("%sUSED%s", theme.Key, theme.Reset), usedW)+" "+
+		padLeft(fmt.Sprintf("%sCAPACITY%s", theme.Key, theme.Reset), barW))
+	lines = append(lines, "\033[90m"+strings.Repeat("─", contentW)+theme.Reset)
+
+	maxRows := availableHeight - len(lines) - 3
+	if maxRows < 1 {
+		maxRows = 1
+	}
+	count := len(metrics.DiskPartitions)
+	if count > maxRows {
+		count = maxRows
+	}
+
+	for i := 0; i < count; i++ {
+		p := metrics.DiskPartitions[i]
+		barStr := drawCleanBar(p.UsedPercent, 8)
+		row := padLine(fmt.Sprintf("\033[38;5;45m%s\033[0m", truncateAnsi(p.Mountpoint, mountW)), mountW) + " " +
+			padLeft(gather.FormatBytes(p.Total), totalW) + " " +
+			padLeft(gather.FormatBytes(p.Used), usedW) + " " +
+			padLeft(barStr, barW)
+		lines = append(lines, row)
+	}
+
+	box := drawBox("◆ Disk Storage & Real-Time I/O Telemetry", lines, w, availableHeight, theme)
+	for _, l := range box {
+		fmt.Printf("%s\033[K\r\n", l)
+	}
+}
+
+// -------------------------------------------------------------
 // Rendering & String Formatting Helpers
 // -------------------------------------------------------------
 
@@ -869,6 +1157,17 @@ func padLine(s string, targetWidth int) string {
 	vLen := visualLen(s)
 	if vLen < targetWidth {
 		return s + strings.Repeat(" ", targetWidth-vLen)
+	}
+	if vLen > targetWidth {
+		return truncateAnsi(s, targetWidth)
+	}
+	return s
+}
+
+func padLeft(s string, targetWidth int) string {
+	vLen := visualLen(s)
+	if vLen < targetWidth {
+		return strings.Repeat(" ", targetWidth-vLen) + s
 	}
 	if vLen > targetWidth {
 		return truncateAnsi(s, targetWidth)
