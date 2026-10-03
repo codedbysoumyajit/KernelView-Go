@@ -932,6 +932,36 @@ var GPULogos = map[string][]string{
 // DisplayGPUInfo formats and prints detailed GPU and graphics API information (exported).
 func DisplayGPUInfo(info *gather.GPUDetails, theme Theme) {
 	vendorKey := strings.ToLower(info.Vendor)
+	if strings.Contains(vendorKey, "nvidia") {
+		vendorKey = "nvidia"
+	} else if strings.Contains(vendorKey, "intel") {
+		vendorKey = "intel"
+	} else if strings.Contains(vendorKey, "amd") || strings.Contains(vendorKey, "advanced micro") || strings.Contains(vendorKey, "radeon") {
+		vendorKey = "amd"
+	} else if strings.Contains(vendorKey, "qualcomm") {
+		vendorKey = "qualcomm"
+	} else if strings.Contains(vendorKey, "apple") {
+		vendorKey = "apple"
+	} else if strings.Contains(vendorKey, "arm") {
+		vendorKey = "arm"
+	} else if strings.Contains(vendorKey, "samsung") {
+		vendorKey = "samsung"
+	}
+
+	if vendorKey == "" || vendorKey == "unknown" {
+		lowerName := strings.ToLower(info.Name)
+		if strings.Contains(lowerName, "nvidia") {
+			vendorKey = "nvidia"
+		} else if strings.Contains(lowerName, "intel") {
+			vendorKey = "intel"
+		} else if strings.Contains(lowerName, "amd") || strings.Contains(lowerName, "radeon") {
+			vendorKey = "amd"
+		} else if strings.Contains(lowerName, "apple") {
+			vendorKey = "apple"
+		} else if strings.Contains(lowerName, "qualcomm") {
+			vendorKey = "qualcomm"
+		}
+	}
 
 	if theme != BlankTheme {
 		switch vendorKey {
@@ -1028,18 +1058,57 @@ func DisplayGPUInfo(info *gather.GPUDetails, theme Theme) {
 	separator := theme.Value + strings.Repeat("-", len(username)+1+len(hostname)) + theme.Reset
 	infoLines = append(infoLines, separator)
 
+	var vramCombined string
+	if info.VRAMUsed != "" && info.VRAMTotal != "" {
+		vramCombined = fmt.Sprintf("%s / %s", info.VRAMUsed, info.VRAMTotal)
+		if info.VRAMType != "" {
+			vramCombined += fmt.Sprintf(" (%s)", info.VRAMType)
+		}
+	} else if info.VRAMTotal != "" {
+		vramCombined = info.VRAMTotal
+		if info.VRAMType != "" {
+			vramCombined += fmt.Sprintf(" (%s)", info.VRAMType)
+		}
+	} else if info.VRAMUsed != "" {
+		vramCombined = info.VRAMUsed
+	}
+
+	driverCombined := info.Driver
+	if info.DriverVersion != "" {
+		if driverCombined != "" && !strings.Contains(driverCombined, info.DriverVersion) {
+			driverCombined = fmt.Sprintf("%s (%s)", driverCombined, info.DriverVersion)
+		} else if driverCombined == "" {
+			driverCombined = info.DriverVersion
+		}
+	}
+
+	vulkanCombined := info.Vulkan
+	if info.VulkanDriver != "" && info.Vulkan != "" && !strings.Contains(info.Vulkan, info.VulkanDriver) {
+		vulkanCombined = fmt.Sprintf("%s (%s)", info.Vulkan, info.VulkanDriver)
+	}
+
 	items := []struct{ Key, Value string }{
 		{"GPU Model", info.Name},
 		{"Vendor", info.Vendor},
-		{"Driver", info.Driver},
-		{"VRAM Used", info.VRAMUsed},
-		{"VRAM Total", info.VRAMTotal},
+		{"Device ID", info.DeviceID},
+		{"Subsystem", info.Subsystem},
+		{"PCI Bus", info.PCIBus},
+		{"Driver", driverCombined},
+		{"Power State", info.PowerState},
+		{"GPU Clock", info.CurrentClock},
+		{"Video Memory", vramCombined},
 		{"VRAM Free", info.VRAMFree},
+		{"Displays", info.ActiveDisplays},
 		{"Temperature", info.Temperature},
 		{"OpenGL", info.OpenGL},
-		{"Vulkan", info.Vulkan},
+		{"GL Renderer", info.OpenGLRenderer},
+		{"GL Core", info.OpenGLCore},
+		{"GL ES", info.OpenGLES},
+		{"Vulkan", vulkanCombined},
 		{"OpenCL", info.OpenCL},
 		{"CUDA", info.CUDA},
+		{"Metal", info.Metal},
+		{"DirectX", info.DirectX},
 	}
 
 	for _, item := range items {
@@ -1247,33 +1316,109 @@ func DisplayNetworkInfo(info *gather.NetworkInfo, theme Theme) {
 	separator := theme.Value + strings.Repeat("-", len(username)+1+len(hostname)+10) + theme.Reset
 	infoLines = append(infoLines, separator)
 
+	var primaryIfaceStr string
+	if info.PrimaryIface != "" {
+		if info.IfaceType != "" {
+			primaryIfaceStr = fmt.Sprintf("%s (%s)", info.PrimaryIface, info.IfaceType)
+		} else {
+			primaryIfaceStr = info.PrimaryIface
+		}
+	}
+
+	var wifiSignalStr string
+	if info.Wifi != nil && (info.Wifi.SignalPerc > 0 || info.Wifi.SignalDBm != 0) {
+		if info.Wifi.SignalPerc > 0 && info.Wifi.SignalDBm != 0 {
+			wifiSignalStr = fmt.Sprintf("%d%% (%d dBm)", info.Wifi.SignalPerc, info.Wifi.SignalDBm)
+		} else if info.Wifi.SignalPerc > 0 {
+			wifiSignalStr = fmt.Sprintf("%d%%", info.Wifi.SignalPerc)
+		} else {
+			wifiSignalStr = fmt.Sprintf("%d dBm", info.Wifi.SignalDBm)
+		}
+	}
+
+	var wifiFreqChannel string
+	if info.Wifi != nil {
+		if info.Wifi.Freq != "" && info.Wifi.Channel != "" {
+			wifiFreqChannel = fmt.Sprintf("%s (Ch %s)", info.Wifi.Freq, info.Wifi.Channel)
+		} else if info.Wifi.Freq != "" {
+			wifiFreqChannel = info.Wifi.Freq
+		} else if info.Wifi.Channel != "" {
+			wifiFreqChannel = fmt.Sprintf("Channel %s", info.Wifi.Channel)
+		}
+	}
+
+	var trafficStr string
+	if info.RxTotal != "" && info.TxTotal != "" && info.RxTotal != "0 B" {
+		trafficStr = fmt.Sprintf("▼ %s │ ▲ %s", info.RxTotal, info.TxTotal)
+	} else if info.IOCounters != "" && info.IOCounters != "N/A" {
+		trafficStr = info.IOCounters
+	}
+
+	var dnsStr string
+	if len(info.DNSServers) > 0 {
+		dnsStr = strings.Join(info.DNSServers, ", ")
+	}
+
+	var locationStr string
+	if info.City != "" && info.Country != "" && info.City != "Unknown" && info.Country != "Unknown" && info.City != "Error" && info.Country != "Error" {
+		locationStr = fmt.Sprintf("%s, %s", info.City, info.Country)
+	} else if info.Country != "" && info.Country != "Unknown" && info.Country != "Error" {
+		locationStr = info.Country
+	} else if info.City != "" && info.City != "Unknown" && info.City != "Error" {
+		locationStr = info.City
+	}
+
+	var otherIfaces []string
+	for _, iface := range info.Interfaces {
+		if iface.Name != info.PrimaryIface && iface.State == "UP" && iface.Type != "Loopback" {
+			addr := iface.IPv4
+			if addr == "" {
+				addr = iface.Type
+			}
+			otherIfaces = append(otherIfaces, fmt.Sprintf("%s (%s)", iface.Name, addr))
+		}
+	}
+	var otherIfacesStr string
+	if len(otherIfaces) > 0 {
+		otherIfacesStr = strings.Join(otherIfaces, ", ")
+	}
+
+	var wifiSSID, wifiBSSID, wifiBitrate, wifiSecurity string
+	if info.Wifi != nil {
+		wifiSSID = info.Wifi.SSID
+		wifiBSSID = info.Wifi.BSSID
+		wifiBitrate = info.Wifi.Bitrate
+		wifiSecurity = info.Wifi.Security
+	}
+
 	items := []struct{ Key, Value string }{
 		{"Hostname", info.Hostname},
-		{"Private IP", info.PrivateIP},
+		{"Primary Interface", primaryIfaceStr},
+		{"IPv4 Address", info.PrivateIP},
+		{"IPv6 Address", info.IPv6Address},
 		{"MAC Address", info.MACAddress},
-		{"I/O Counters", info.IOCounters},
+		{"Default Gateway", info.Gateway},
+		{"DNS Servers", dnsStr},
+		{"Wi-Fi SSID", wifiSSID},
+		{"Wi-Fi BSSID", wifiBSSID},
+		{"Wi-Fi Signal", wifiSignalStr},
+		{"Wi-Fi Channel/Band", wifiFreqChannel},
+		{"Wi-Fi Link Speed", wifiBitrate},
+		{"Wi-Fi Security", wifiSecurity},
 		{"Public IP", info.PublicIP},
-		{"ISP", info.ISP},
-		{"Location", fmt.Sprintf("%s, %s", info.City, info.Country)},
-		{"Proxy", info.Proxy},
-		{"DNS Servers", strings.Join(info.DNSServers, ", ")},
+		{"ISP / Org", info.ISP},
+		{"Location", locationStr},
 		{"Ping (1.1.1.1)", info.Ping},
+		{"Network Traffic", trafficStr},
+		{"Packets & Errors", info.PacketStats},
+		{"Active Sockets", info.SocketStats},
+		{"Other Interfaces", otherIfacesStr},
+		{"Proxy", info.Proxy},
 	}
 
 	for _, item := range items {
 		val := strings.TrimSpace(item.Value)
-		if val != "" && val != "N/A" && val != "Error" && val != "," && val != "Error, Error" {
-			if item.Key == "Location" && (info.City == "" || info.City == "Error" || info.City == "Unknown") && (info.Country == "" || info.Country == "Error" || info.Country == "Unknown") {
-				continue
-			}
-			if item.Key == "Location" {
-				if info.City == "" || info.City == "Error" || info.City == "Unknown" {
-					val = info.Country
-				} else if info.Country == "" || info.Country == "Error" || info.Country == "Unknown" {
-					val = info.City
-				}
-			}
-
+		if val != "" && val != "N/A" && val != "Error" && val != "," && val != "Error, Error" && val != "Unknown" && val != "None" {
 			valAllowed := termWidth - logoWidth - 3 - len(item.Key) - 4
 			if valAllowed > 5 {
 				val = truncateString(val, valAllowed)
