@@ -1904,13 +1904,25 @@ func getDefaultGateway() string {
 		}
 	} else if runtime.GOOS == "darwin" || runtime.GOOS == "freebsd" || runtime.GOOS == "openbsd" {
 		out := runCommand("route", "-n", "get", "default")
+		var gw, iface string
 		for _, line := range strings.Split(out, "\n") {
 			if strings.Contains(line, "gateway:") {
 				parts := strings.Split(line, ":")
 				if len(parts) > 1 {
-					return strings.TrimSpace(parts[1])
+					gw = strings.TrimSpace(parts[1])
+				}
+			} else if strings.Contains(line, "interface:") {
+				parts := strings.Split(line, ":")
+				if len(parts) > 1 {
+					iface = strings.TrimSpace(parts[1])
 				}
 			}
+		}
+		if gw != "" {
+			if iface != "" {
+				return fmt.Sprintf("%s (%s)", gw, iface)
+			}
+			return gw
 		}
 	} else if runtime.GOOS == "windows" {
 		out := runCommand("route", "print", "0.0.0.0")
@@ -1920,8 +1932,21 @@ func getDefaultGateway() string {
 				return fmt.Sprintf("%s (%s)", fields[2], fields[3])
 			}
 		}
+		psOut := runCommand("powershell", "-NoProfile", "-NonInteractive", "-Command", "Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Select-Object -First 1 -ExpandProperty NextHop")
+		if psOut != "" {
+			return psOut
+		}
 	}
 	return "N/A"
+}
+
+func sliceContains(slice []string, val string) bool {
+	for _, item := range slice {
+		if strings.EqualFold(item, val) {
+			return true
+		}
+	}
+	return false
 }
 
 func getWifiDetails(ifaceName string) *WifiInfo {
@@ -2021,35 +2046,68 @@ func getWifiDetails(ifaceName string) *WifiInfo {
 					}
 					wifi.SignalPerc = perc
 				} else if strings.HasPrefix(line, "channel: ") {
-					wifi.Freq = fmt.Sprintf("Channel %s", strings.TrimPrefix(line, "channel: "))
+					ch := strings.TrimPrefix(line, "channel: ")
+					if parts := strings.Split(ch, ","); len(parts) > 0 {
+						wifi.Channel = parts[0]
+					}
+				} else if strings.HasPrefix(line, "lastTxRate: ") {
+					wifi.Bitrate = strings.TrimPrefix(line, "lastTxRate: ") + " Mbps"
+				} else if strings.HasPrefix(line, "link auth: ") {
+					wifi.Security = strings.TrimPrefix(line, "link auth: ")
 				}
 			}
+			return wifi
+		}
+		// Fallback for macOS Sonoma / Sequoia
+		ssidOut := runCommand("networksetup", "-getairportnetwork", ifaceName)
+		if ssidOut != "" && strings.Contains(ssidOut, "Current Wi-Fi Network:") {
+			wifi := &WifiInfo{}
+			wifi.SSID = strings.TrimSpace(strings.TrimPrefix(ssidOut, "Current Wi-Fi Network:"))
 			return wifi
 		}
 	} else if runtime.GOOS == "windows" {
 		out := runCommand("netsh", "wlan", "show", "interfaces")
 		if out != "" && strings.Contains(out, "SSID") {
 			wifi := &WifiInfo{}
+			var rxRate, txRate string
 			for _, line := range strings.Split(out, "\n") {
 				line = strings.TrimSpace(line)
-				if strings.HasPrefix(line, "SSID") && !strings.Contains(line, "BSSID") {
-					parts := strings.SplitN(line, ":", 2)
-					if len(parts) == 2 {
-						wifi.SSID = strings.TrimSpace(parts[1])
-					}
-				} else if strings.HasPrefix(line, "BSSID") {
-					parts := strings.SplitN(line, ":", 2)
-					if len(parts) == 2 {
-						wifi.BSSID = strings.TrimSpace(parts[1])
-					}
-				} else if strings.HasPrefix(line, "Signal") {
-					parts := strings.SplitN(line, ":", 2)
-					if len(parts) == 2 {
-						sigStr := strings.TrimSuffix(strings.TrimSpace(parts[1]), "%")
-						sig, _ := strconv.Atoi(sigStr)
-						wifi.SignalPerc = sig
-					}
+				parts := strings.SplitN(line, ":", 2)
+				if len(parts) != 2 {
+					continue
 				}
+				key := strings.TrimSpace(parts[0])
+				val := strings.TrimSpace(parts[1])
+
+				switch key {
+				case "SSID":
+					wifi.SSID = val
+				case "BSSID":
+					wifi.BSSID = val
+				case "Signal":
+					sigStr := strings.TrimSuffix(val, "%")
+					if sig, err := strconv.Atoi(sigStr); err == nil {
+						wifi.SignalPerc = sig
+						wifi.SignalDBm = int(float64(sig)/2.0 - 100.0)
+					}
+				case "Radio type":
+					wifi.Freq = val
+				case "Channel":
+					wifi.Channel = val
+				case "Receive rate (Mbps)":
+					rxRate = val + " Mbps (RX)"
+				case "Transmit rate (Mbps)":
+					txRate = val + " Mbps (TX)"
+				case "Authentication":
+					wifi.Security = val
+				}
+			}
+			if rxRate != "" && txRate != "" {
+				wifi.Bitrate = fmt.Sprintf("%s │ %s", rxRate, txRate)
+			} else if rxRate != "" {
+				wifi.Bitrate = rxRate
+			} else if txRate != "" {
+				wifi.Bitrate = txRate
 			}
 			return wifi
 		}
@@ -2090,6 +2148,25 @@ func getSocketStats() string {
 			}
 		}
 	}
+
+	// Cross-platform fallback for Windows, macOS, FreeBSD, OpenBSD: netstat -an
+	out := runCommand("netstat", "-an")
+	if out != "" {
+		var tcpCount, udpCount int
+		for _, line := range strings.Split(out, "\n") {
+			line = strings.TrimSpace(line)
+			lower := strings.ToLower(line)
+			if strings.HasPrefix(lower, "tcp") {
+				tcpCount++
+			} else if strings.HasPrefix(lower, "udp") {
+				udpCount++
+			}
+		}
+		if tcpCount > 0 || udpCount > 0 {
+			return fmt.Sprintf("TCP: %d active │ UDP: %d active │ Total: %d", tcpCount, udpCount, tcpCount+udpCount)
+		}
+	}
+
 	return ""
 }
 
@@ -2121,7 +2198,7 @@ func getProxyInfo() string {
 
 func getDNSServers() []string {
 	var dnsServers []string
-	if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
+	if runtime.GOOS == "linux" || runtime.GOOS == "darwin" || runtime.GOOS == "freebsd" || runtime.GOOS == "openbsd" {
 		content, err := os.ReadFile("/etc/resolv.conf")
 		if err == nil {
 			lines := strings.Split(string(content), "\n")
@@ -2135,8 +2212,57 @@ func getDNSServers() []string {
 				}
 			}
 		}
+		if runtime.GOOS == "darwin" && len(dnsServers) == 0 {
+			out := runCommand("scutil", "--dns")
+			for _, line := range strings.Split(out, "\n") {
+				line = strings.TrimSpace(line)
+				if strings.HasPrefix(line, "nameserver[") {
+					parts := strings.Split(line, ":")
+					if len(parts) > 1 {
+						ns := strings.TrimSpace(parts[1])
+						if ns != "" && !sliceContains(dnsServers, ns) {
+							dnsServers = append(dnsServers, ns)
+						}
+					}
+				}
+			}
+		}
 	} else if runtime.GOOS == "windows" {
-		return []string{"(Check ipconfig /all)"}
+		out := runCommand("powershell", "-NoProfile", "-NonInteractive", "-Command", "Get-DnsClientServerAddress -AddressFamily IPv4 | Where-Object {$_.ServerAddresses} | Select-Object -ExpandProperty ServerAddresses")
+		if out != "" {
+			for _, line := range strings.Split(out, "\n") {
+				line = strings.TrimSpace(line)
+				if line != "" && net.ParseIP(line) != nil && !sliceContains(dnsServers, line) {
+					dnsServers = append(dnsServers, line)
+				}
+			}
+		}
+		if len(dnsServers) == 0 {
+			out := runCommand("ipconfig", "/all")
+			capture := false
+			for _, line := range strings.Split(out, "\n") {
+				line = strings.TrimSpace(line)
+				if strings.Contains(line, "DNS Servers") {
+					parts := strings.Split(line, ":")
+					if len(parts) > 1 {
+						ns := strings.TrimSpace(parts[1])
+						if net.ParseIP(ns) != nil && !sliceContains(dnsServers, ns) {
+							dnsServers = append(dnsServers, ns)
+						}
+					}
+					capture = true
+				} else if capture {
+					if strings.Contains(line, ":") {
+						capture = false
+					} else {
+						ns := strings.TrimSpace(line)
+						if net.ParseIP(ns) != nil && !sliceContains(dnsServers, ns) {
+							dnsServers = append(dnsServers, ns)
+						}
+					}
+				}
+			}
+		}
 	}
 	if len(dnsServers) == 0 {
 		return []string{"N/A"}
@@ -2441,6 +2567,14 @@ func GetNetworkDetails() (*NetworkInfo, error) {
 		var primaryName string
 		var totalRx, totalTx, totalRxPackets, totalTxPackets, totalRxErr, totalTxErr uint64
 
+		var ioMap map[string]psnet.IOCountersStat
+		if counters, errC := psnet.IOCounters(true); errC == nil {
+			ioMap = make(map[string]psnet.IOCountersStat, len(counters))
+			for _, c := range counters {
+				ioMap[c.Name] = c
+			}
+		}
+
 		gwIface := ""
 		if strings.Contains(info.Gateway, "(") {
 			parts := strings.Split(info.Gateway, "(")
@@ -2523,6 +2657,20 @@ func GetNetworkDetails() (*NetworkInfo, error) {
 					if s != "" && s != "-1" {
 						detail.Speed = s + " Mbps"
 					}
+				}
+			}
+
+			// Cross-platform fallback for Windows, macOS, BSD, or if Linux sysfs didn't have stats
+			if detail.RxBytes == 0 && detail.TxBytes == 0 && ioMap != nil {
+				if c, ok := ioMap[iface.Name]; ok {
+					detail.RxBytes = c.BytesRecv
+					detail.TxBytes = c.BytesSent
+					detail.RxPackets = c.PacketsRecv
+					detail.TxPackets = c.PacketsSent
+					detail.RxErrors = c.Errin
+					detail.TxErrors = c.Errout
+					detail.RxDropped = c.Dropin
+					detail.TxDropped = c.Dropout
 				}
 			}
 
@@ -3250,6 +3398,36 @@ func getAMDOrIntelTemp(cardName string) float64 {
 	return 0
 }
 
+func getAMDOrIntelTempFormatted(cardName string) string {
+	hwmonDir := fmt.Sprintf("/sys/class/drm/%s/device/hwmon", cardName)
+	files, err := os.ReadDir(hwmonDir)
+	if err == nil {
+		for _, f := range files {
+			if strings.HasPrefix(f.Name(), "hwmon") {
+				base := fmt.Sprintf("%s/%s", hwmonDir, f.Name())
+				var edge, junc float64
+				if bytes, err := os.ReadFile(fmt.Sprintf("%s/temp1_input", base)); err == nil {
+					if mVal, err := strconv.ParseFloat(strings.TrimSpace(string(bytes)), 64); err == nil {
+						edge = mVal / 1000.0
+					}
+				}
+				if bytes, err := os.ReadFile(fmt.Sprintf("%s/temp2_input", base)); err == nil {
+					if mVal, err := strconv.ParseFloat(strings.TrimSpace(string(bytes)), 64); err == nil {
+						junc = mVal / 1000.0
+					}
+				}
+				if edge > 0 {
+					if junc > 0 {
+						return fmt.Sprintf("%.1f °C (Junction: %.1f °C)", edge, junc)
+					}
+					return fmt.Sprintf("%.1f °C", edge)
+				}
+			}
+		}
+	}
+	return ""
+}
+
 func getGPUMetrics() (LiveGPUMetrics, error) {
 	metrics := LiveGPUMetrics{}
 
@@ -3439,6 +3617,374 @@ type GPUDetails struct {
 	DirectX        string
 }
 
+// getSubsystemVendorName maps PCI subsystem vendor hex IDs to human-readable manufacturer names
+func getSubsystemVendorName(hex string) string {
+	hex = strings.ToLower(strings.TrimPrefix(hex, "0x"))
+	switch hex {
+	case "1043":
+		return "ASUS"
+	case "1028":
+		return "Dell"
+	case "103c":
+		return "HP"
+	case "17aa":
+		return "Lenovo"
+	case "1462":
+		return "MSI"
+	case "1458":
+		return "Gigabyte"
+	case "1da2", "174b":
+		return "Sapphire"
+	case "1787":
+		return "PowerColor"
+	case "1849":
+		return "ASRock"
+	case "1682":
+		return "XFX"
+	case "19da", "1b4b":
+		return "Zotac"
+	case "196e":
+		return "PNY"
+	case "1569":
+		return "Palit"
+	case "10b0":
+		return "Gainward"
+	case "10de":
+		return "Nvidia"
+	case "1002":
+		return "AMD"
+	case "8086":
+		return "Intel"
+	case "1025":
+		return "Acer"
+	case "1558":
+		return "Clevo"
+	case "144d":
+		return "Samsung"
+	case "106b":
+		return "Apple"
+	case "1d05":
+		return "Tongfang"
+	case "1af4":
+		return "VirtIO"
+	case "15ad":
+		return "VMware"
+	case "80ee":
+		return "VirtualBox"
+	case "1414":
+		return "Microsoft"
+	}
+	return ""
+}
+
+// getNvidiaDetails queries nvidia-smi cross-platform (Linux & Windows) for deep telemetry
+func getNvidiaDetails() (name, driverVer, pciBus, vramTotal, vramUsed, vramFree, temp, power, clock, displays string, ok bool) {
+	nvsmiPath := "nvidia-smi"
+	if runtime.GOOS == "windows" {
+		if p, err := exec.LookPath("nvidia-smi"); err == nil {
+			nvsmiPath = p
+		} else if _, err := os.Stat(`C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe`); err == nil {
+			nvsmiPath = `C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe`
+		} else {
+			return
+		}
+	} else {
+		if _, err := exec.LookPath("nvidia-smi"); err != nil {
+			return
+		}
+	}
+
+	out := runCommand(nvsmiPath, "--query-gpu=gpu_name,driver_version,pci.bus_id,memory.total,memory.used,memory.free,temperature.gpu,power.draw,power.limit,clocks.current.graphics,clocks.max.graphics,display_active", "--format=csv,noheader,nounits")
+	if out == "" {
+		return
+	}
+
+	lines := strings.Split(out, "\n")
+	if len(lines) == 0 {
+		return
+	}
+	line := strings.TrimSpace(lines[0])
+	parts := strings.Split(line, ",")
+	if len(parts) < 11 {
+		return
+	}
+
+	name = strings.TrimSpace(parts[0])
+	driverVer = strings.TrimSpace(parts[1])
+	pciBus = strings.TrimSpace(parts[2])
+
+	totMB, _ := strconv.ParseUint(strings.TrimSpace(parts[3]), 10, 64)
+	usedMB, _ := strconv.ParseUint(strings.TrimSpace(parts[4]), 10, 64)
+	freeMB, _ := strconv.ParseUint(strings.TrimSpace(parts[5]), 10, 64)
+	if totMB > 0 {
+		vramTotal = FormatBytes(totMB * 1024 * 1024)
+		vramUsed = FormatBytes(usedMB * 1024 * 1024)
+		vramFree = FormatBytes(freeMB * 1024 * 1024)
+	}
+
+	if t, err := strconv.ParseFloat(strings.TrimSpace(parts[6]), 64); err == nil && t > 0 {
+		temp = fmt.Sprintf("%.1f °C", t)
+	}
+
+	drawW, _ := strconv.ParseFloat(strings.TrimSpace(parts[7]), 64)
+	limitW, _ := strconv.ParseFloat(strings.TrimSpace(parts[8]), 64)
+	if drawW > 0 {
+		if limitW > 0 {
+			power = fmt.Sprintf("D0 (%.1f W / %.1f W)", drawW, limitW)
+		} else {
+			power = fmt.Sprintf("D0 (%.1f W)", drawW)
+		}
+	}
+
+	curC := strings.TrimSpace(parts[9])
+	maxC := strings.TrimSpace(parts[10])
+	if curC != "" && curC != "[Not Supported]" {
+		if maxC != "" && maxC != "[Not Supported]" {
+			clock = fmt.Sprintf("%s MHz (Max: %s MHz)", curC, maxC)
+		} else {
+			clock = fmt.Sprintf("%s MHz", curC)
+		}
+	}
+
+	if len(parts) >= 12 {
+		disp := strings.TrimSpace(parts[11])
+		if disp == "Enabled" || disp == "1" {
+			displays = "Connected (Active)"
+		}
+	}
+
+	ok = true
+	return
+}
+
+// getWindowsGPUDetails queries Windows WMI/CIM for full display adapter telemetry
+func getWindowsGPUDetails(details *GPUDetails) {
+	psCmd := `Get-CimInstance Win32_VideoController | Select-Object Name,AdapterRAM,DriverVersion,VideoProcessor,Status,CurrentHorizontalResolution,CurrentVerticalResolution,CurrentRefreshRate,PNPDeviceID | ConvertTo-Json -Compress`
+	out := runCommand("powershell", "-NoProfile", "-NonInteractive", "-Command", psCmd)
+
+	type winGPU struct {
+		Name                        string      `json:"Name"`
+		AdapterRAM                  interface{} `json:"AdapterRAM"`
+		DriverVersion               string      `json:"DriverVersion"`
+		VideoProcessor              string      `json:"VideoProcessor"`
+		Status                      string      `json:"Status"`
+		CurrentHorizontalResolution int         `json:"CurrentHorizontalResolution"`
+		CurrentVerticalResolution   int         `json:"CurrentVerticalResolution"`
+		CurrentRefreshRate          int         `json:"CurrentRefreshRate"`
+		PNPDeviceID                 string      `json:"PNPDeviceID"`
+	}
+
+	var gpus []winGPU
+	if out != "" {
+		trimmed := strings.TrimSpace(out)
+		if strings.HasPrefix(trimmed, "[") {
+			_ = json.Unmarshal([]byte(trimmed), &gpus)
+		} else if strings.HasPrefix(trimmed, "{") {
+			var single winGPU
+			if err := json.Unmarshal([]byte(trimmed), &single); err == nil {
+				gpus = append(gpus, single)
+			}
+		}
+	}
+
+	if len(gpus) == 0 {
+		wmicOut := runCommand("wmic", "path", "win32_VideoController", "get", "Name,AdapterRAM,DriverVersion,Status,PNPDeviceID", "/format:list")
+		if wmicOut != "" {
+			var g winGPU
+			for _, line := range strings.Split(wmicOut, "\n") {
+				parts := strings.SplitN(strings.TrimSpace(line), "=", 2)
+				if len(parts) == 2 {
+					k, v := parts[0], parts[1]
+					switch k {
+					case "Name":
+						g.Name = v
+					case "AdapterRAM":
+						g.AdapterRAM = v
+					case "DriverVersion":
+						g.DriverVersion = v
+					case "Status":
+						g.Status = v
+					case "PNPDeviceID":
+						g.PNPDeviceID = v
+					}
+				}
+			}
+			if g.Name != "" {
+				gpus = append(gpus, g)
+			}
+		}
+	}
+
+	if len(gpus) > 0 {
+		g := gpus[0]
+		if details.Name == "" || details.Name == "Unknown" {
+			details.Name = g.Name
+		}
+		if details.DriverVersion == "" {
+			details.DriverVersion = g.DriverVersion
+		}
+		if g.Status != "" && details.PowerState == "" {
+			details.PowerState = fmt.Sprintf("%s (Active)", g.Status)
+		}
+
+		if details.VRAMTotal == "" {
+			var ramBytes uint64
+			switch v := g.AdapterRAM.(type) {
+			case float64:
+				ramBytes = uint64(v)
+			case string:
+				ramBytes, _ = strconv.ParseUint(v, 10, 64)
+			}
+			if ramBytes > 0 {
+				details.VRAMTotal = FormatBytes(ramBytes)
+			}
+		}
+
+		if g.CurrentHorizontalResolution > 0 && g.CurrentVerticalResolution > 0 {
+			if g.CurrentRefreshRate > 0 {
+				details.ActiveDisplays = fmt.Sprintf("%dx%d @ %dHz (Connected)", g.CurrentHorizontalResolution, g.CurrentVerticalResolution, g.CurrentRefreshRate)
+			} else {
+				details.ActiveDisplays = fmt.Sprintf("%dx%d (Connected)", g.CurrentHorizontalResolution, g.CurrentVerticalResolution)
+			}
+		}
+
+		if g.PNPDeviceID != "" {
+			upper := strings.ToUpper(g.PNPDeviceID)
+			if venIdx := strings.Index(upper, "VEN_"); venIdx != -1 && len(upper) >= venIdx+8 {
+				venHex := strings.ToLower(upper[venIdx+4 : venIdx+8])
+				switch venHex {
+				case "10de":
+					details.Vendor = "Nvidia"
+				case "1002":
+					details.Vendor = "AMD"
+				case "8086":
+					details.Vendor = "Intel"
+				case "17cb":
+					details.Vendor = "Qualcomm"
+				}
+				if devIdx := strings.Index(upper, "DEV_"); devIdx != -1 && len(upper) >= devIdx+8 {
+					devHex := strings.ToLower(upper[devIdx+4 : devIdx+8])
+					details.DeviceID = fmt.Sprintf("[%s:%s]", venHex, devHex)
+				}
+			}
+		}
+	}
+}
+
+// getDarwinGPUDetails queries macOS SPDisplaysDataType for deep Apple Silicon & Intel Mac GPU telemetry
+func getDarwinGPUDetails(details *GPUDetails) {
+	out := runCommand("system_profiler", "SPDisplaysDataType")
+	if out == "" {
+		return
+	}
+
+	lines := strings.Split(out, "\n")
+	var currentDisplay string
+	var inDisplays bool
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+
+		if strings.HasPrefix(trimmed, "Chipset Model:") {
+			parts := strings.SplitN(trimmed, ":", 2)
+			if len(parts) == 2 {
+				details.Name = strings.TrimSpace(parts[1])
+			}
+		} else if strings.HasPrefix(trimmed, "Vendor:") {
+			parts := strings.SplitN(trimmed, ":", 2)
+			if len(parts) == 2 {
+				v := strings.TrimSpace(parts[1])
+				vLower := strings.ToLower(v)
+				if strings.Contains(vLower, "apple") {
+					details.Vendor = "Apple"
+					details.VRAMType = "Unified System Memory"
+				} else if strings.Contains(vLower, "intel") {
+					details.Vendor = "Intel"
+				} else if strings.Contains(vLower, "amd") || strings.Contains(vLower, "ati") {
+					details.Vendor = "AMD"
+				} else if strings.Contains(vLower, "nvidia") {
+					details.Vendor = "Nvidia"
+				} else {
+					details.Vendor = v
+				}
+			}
+		} else if strings.HasPrefix(trimmed, "Bus:") || strings.HasPrefix(trimmed, "PCIe Lane Width:") {
+			parts := strings.SplitN(trimmed, ":", 2)
+			if len(parts) == 2 && details.PCIBus == "" {
+				details.PCIBus = strings.TrimSpace(parts[1])
+			}
+		} else if strings.HasPrefix(trimmed, "Total Number of Cores:") {
+			parts := strings.SplitN(trimmed, ":", 2)
+			if len(parts) == 2 {
+				details.Subsystem = fmt.Sprintf("%s GPU Cores", strings.TrimSpace(parts[1]))
+			}
+		} else if strings.HasPrefix(trimmed, "VRAM (Total):") {
+			parts := strings.SplitN(trimmed, ":", 2)
+			if len(parts) == 2 {
+				details.VRAMTotal = strings.TrimSpace(parts[1])
+			}
+		} else if strings.HasPrefix(trimmed, "Metal Support:") || strings.HasPrefix(trimmed, "Metal:") || strings.HasPrefix(trimmed, "Metal Family:") {
+			parts := strings.SplitN(trimmed, ":", 2)
+			if len(parts) == 2 {
+				details.Metal = strings.TrimSpace(parts[1])
+			}
+		} else if trimmed == "Displays:" {
+			inDisplays = true
+		} else if inDisplays {
+			if strings.HasSuffix(trimmed, ":") && !strings.Contains(trimmed, "Type:") && !strings.Contains(trimmed, "Resolution:") {
+				dName := strings.TrimSuffix(trimmed, ":")
+				if dName != "" {
+					currentDisplay = dName
+				}
+			} else if strings.HasPrefix(trimmed, "Resolution:") {
+				parts := strings.SplitN(trimmed, ":", 2)
+				if len(parts) == 2 {
+					res := strings.TrimSpace(parts[1])
+					dispStr := res
+					if currentDisplay != "" {
+						dispStr = fmt.Sprintf("%s (%s, Connected)", currentDisplay, res)
+					} else {
+						dispStr = fmt.Sprintf("%s (Connected)", res)
+					}
+					if details.ActiveDisplays == "" {
+						details.ActiveDisplays = dispStr
+					} else {
+						details.ActiveDisplays += ", " + dispStr
+					}
+				}
+			}
+		}
+	}
+}
+
+// getBSDGPUDetails queries FreeBSD / OpenBSD pciconf for GPU and display controllers
+func getBSDGPUDetails(details *GPUDetails) {
+	out := runCommand("pciconf", "-lv")
+	if out == "" {
+		return
+	}
+	var inVGA bool
+	for _, line := range strings.Split(out, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.Contains(line, "class=0x03") || strings.Contains(line, "subclass=VGA") || strings.Contains(line, "class=display") {
+			inVGA = true
+		} else if inVGA && strings.Contains(line, "class=0x") {
+			inVGA = false
+		}
+		if inVGA {
+			if strings.HasPrefix(trimmed, "vendor") && strings.Contains(trimmed, "=") {
+				parts := strings.SplitN(trimmed, "=", 2)
+				v := strings.Trim(strings.TrimSpace(parts[1]), "'")
+				details.Vendor = v
+			} else if strings.HasPrefix(trimmed, "device") && strings.Contains(trimmed, "=") {
+				parts := strings.SplitN(trimmed, "=", 2)
+				d := strings.Trim(strings.TrimSpace(parts[1]), "'")
+				details.Name = d
+			}
+		}
+	}
+}
+
 // GetGPUDetails collects detailed GPU and graphics API information
 func GetGPUDetails() *GPUDetails {
 	details := &GPUDetails{}
@@ -3473,6 +4019,38 @@ func GetGPUDetails() *GPUDetails {
 
 	// 3. Resolve Hardware, Vendor, Driver, VRAM, Clocks, Displays based on OS
 	if runtime.GOOS == "linux" {
+		// Check nvidia-smi first (Nvidia Proprietary driver)
+		if nName, nVer, nBus, nTot, nUsed, nFree, nTemp, nPwr, nClk, nDisp, ok := getNvidiaDetails(); ok {
+			if nName != "" {
+				details.Name = nName
+			}
+			details.Vendor = "Nvidia"
+			details.Driver = "Nvidia Proprietary"
+			if nVer != "" {
+				details.DriverVersion = nVer
+			}
+			if nBus != "" {
+				details.PCIBus = nBus
+			}
+			if nTot != "" {
+				details.VRAMTotal = nTot
+				details.VRAMUsed = nUsed
+				details.VRAMFree = nFree
+			}
+			if nTemp != "" {
+				details.Temperature = nTemp
+			}
+			if nPwr != "" {
+				details.PowerState = nPwr
+			}
+			if nClk != "" {
+				details.CurrentClock = nClk
+			}
+			if nDisp != "" && details.ActiveDisplays == "" {
+				details.ActiveDisplays = nDisp
+			}
+		}
+
 		files, err := os.ReadDir("/sys/class/drm")
 		if err == nil {
 			var bestCard string
@@ -3522,16 +4100,20 @@ func GetGPUDetails() *GPUDetails {
 				devicePath := fmt.Sprintf("%s/device", cardPath)
 
 				// PCI Bus
-				if target, err := os.Readlink(devicePath); err == nil {
-					parts := strings.Split(target, "/")
-					details.PCIBus = parts[len(parts)-1]
+				if details.PCIBus == "" {
+					if target, err := os.Readlink(devicePath); err == nil {
+						parts := strings.Split(target, "/")
+						details.PCIBus = parts[len(parts)-1]
+					}
 				}
 
 				// Resolve Driver
-				driverLink := fmt.Sprintf("%s/driver", devicePath)
-				if target, err := os.Readlink(driverLink); err == nil {
-					parts := strings.Split(target, "/")
-					details.Driver = parts[len(parts)-1]
+				if details.Driver == "" {
+					driverLink := fmt.Sprintf("%s/driver", devicePath)
+					if target, err := os.Readlink(driverLink); err == nil {
+						parts := strings.Split(target, "/")
+						details.Driver = parts[len(parts)-1]
+					}
 				}
 
 				// Resolve Vendor & Device ID
@@ -3540,208 +4122,319 @@ func GetGPUDetails() *GPUDetails {
 				var vendorHex, devHex string
 				if errV == nil {
 					vendorHex = strings.TrimPrefix(strings.TrimSpace(strings.ToLower(string(vendorBytes))), "0x")
-					if vendorHex == "8086" {
-						details.Vendor = "Intel"
-					} else if vendorHex == "10de" {
-						details.Vendor = "Nvidia"
-					} else if vendorHex == "1002" {
-						details.Vendor = "AMD"
-					} else if vendorHex == "17cb" {
-						details.Vendor = "Qualcomm"
-					} else if vendorHex == "13d3" {
-						details.Vendor = "IMC Networks"
+					if details.Vendor == "" {
+						if vendorHex == "8086" {
+							details.Vendor = "Intel"
+						} else if vendorHex == "10de" {
+							details.Vendor = "Nvidia"
+						} else if vendorHex == "1002" {
+							details.Vendor = "AMD"
+						} else if vendorHex == "17cb" {
+							details.Vendor = "Qualcomm"
+						} else if vendorHex == "13d3" {
+							details.Vendor = "IMC Networks"
+						}
 					}
 				}
 				if errD == nil {
 					devHex = strings.TrimPrefix(strings.TrimSpace(strings.ToLower(string(devIDBytes))), "0x")
 				}
-				if vendorHex != "" && devHex != "" {
+				if vendorHex != "" && devHex != "" && details.DeviceID == "" {
 					details.DeviceID = fmt.Sprintf("[%s:%s]", vendorHex, devHex)
 				}
 
 				// Subsystem vendor/device
-				subVendorBytes, _ := os.ReadFile(fmt.Sprintf("%s/subsystem_vendor", devicePath))
-				subDevBytes, _ := os.ReadFile(fmt.Sprintf("%s/subsystem_device", devicePath))
-				subVHex := strings.TrimPrefix(strings.TrimSpace(strings.ToLower(string(subVendorBytes))), "0x")
-				subDHex := strings.TrimPrefix(strings.TrimSpace(strings.ToLower(string(subDevBytes))), "0x")
-				if subVHex != "" {
-					var subName string
-					switch subVHex {
-					case "1043":
-						subName = "ASUS"
-					case "1028":
-						subName = "Dell"
-					case "103c":
-						subName = "HP"
-					case "17aa":
-						subName = "Lenovo"
-					case "1462":
-						subName = "MSI"
-					case "1458":
-						subName = "Gigabyte"
-					case "10de":
-						subName = "Nvidia"
-					case "1002":
-						subName = "AMD"
-					case "8086":
-						subName = "Intel"
-					case "1025":
-						subName = "Acer"
-					case "1558":
-						subName = "Clevo"
-					}
-					if subName != "" {
-						if subDHex != "" {
-							details.Subsystem = fmt.Sprintf("%s [%s:%s]", subName, subVHex, subDHex)
-						} else {
-							details.Subsystem = fmt.Sprintf("%s [%s]", subName, subVHex)
+				if details.Subsystem == "" {
+					subVendorBytes, _ := os.ReadFile(fmt.Sprintf("%s/subsystem_vendor", devicePath))
+					subDevBytes, _ := os.ReadFile(fmt.Sprintf("%s/subsystem_device", devicePath))
+					subVHex := strings.TrimPrefix(strings.TrimSpace(strings.ToLower(string(subVendorBytes))), "0x")
+					subDHex := strings.TrimPrefix(strings.TrimSpace(strings.ToLower(string(subDevBytes))), "0x")
+					if subVHex != "" {
+						subName := getSubsystemVendorName(subVHex)
+						if subName != "" {
+							if subDHex != "" {
+								details.Subsystem = fmt.Sprintf("%s [%s:%s]", subName, subVHex, subDHex)
+							} else {
+								details.Subsystem = fmt.Sprintf("%s [%s]", subName, subVHex)
+							}
+						} else if subDHex != "" {
+							details.Subsystem = fmt.Sprintf("[%s:%s]", subVHex, subDHex)
 						}
-					} else if subDHex != "" {
-						details.Subsystem = fmt.Sprintf("[%s:%s]", subVHex, subDHex)
 					}
 				}
 
 				// Power State
-				powerBytes, errP := os.ReadFile(fmt.Sprintf("%s/power_state", devicePath))
-				if errP == nil {
-					pState := strings.TrimSpace(string(powerBytes))
-					if pState != "" {
-						details.PowerState = pState
+				if details.PowerState == "" {
+					powerBytes, errP := os.ReadFile(fmt.Sprintf("%s/power_state", devicePath))
+					if errP == nil {
+						pState := strings.TrimSpace(string(powerBytes))
+						if pState != "" {
+							details.PowerState = pState
+						}
 					}
 				}
 
-				// Clock frequencies (Intel iGPU sysfs)
-				curFreq, _ := os.ReadFile(fmt.Sprintf("%s/drm/%s/gt_act_freq_mhz", devicePath, bestCard))
-				if len(curFreq) == 0 {
-					curFreq, _ = os.ReadFile(fmt.Sprintf("%s/drm/%s/gt_cur_freq_mhz", devicePath, bestCard))
-				}
-				maxFreq, _ := os.ReadFile(fmt.Sprintf("%s/drm/%s/gt_max_freq_mhz", devicePath, bestCard))
-				minFreq, _ := os.ReadFile(fmt.Sprintf("%s/drm/%s/gt_min_freq_mhz", devicePath, bestCard))
-				cStr := strings.TrimSpace(string(curFreq))
-				maxStr := strings.TrimSpace(string(maxFreq))
-				minStr := strings.TrimSpace(string(minFreq))
-				if cStr != "" {
-					if maxStr != "" && minStr != "" {
-						details.CurrentClock = fmt.Sprintf("%s MHz (Min: %s MHz │ Max: %s MHz)", cStr, minStr, maxStr)
-					} else if maxStr != "" {
-						details.CurrentClock = fmt.Sprintf("%s MHz (Max: %s MHz)", cStr, maxStr)
-					} else {
-						details.CurrentClock = fmt.Sprintf("%s MHz", cStr)
-					}
-				}
-
-				// Displays & Monitors
-				var displays []string
-				for _, subF := range files {
-					if strings.HasPrefix(subF.Name(), bestCard+"-") {
-						connectorName := strings.TrimPrefix(subF.Name(), bestCard+"-")
-						statusBytes, errSt := os.ReadFile(fmt.Sprintf("/sys/class/drm/%s/status", subF.Name()))
-						if errSt == nil && strings.TrimSpace(string(statusBytes)) == "connected" {
-							modesBytes, _ := os.ReadFile(fmt.Sprintf("/sys/class/drm/%s/modes", subF.Name()))
-							mode := ""
-							if len(modesBytes) > 0 {
-								modeLines := strings.Split(strings.TrimSpace(string(modesBytes)), "\n")
-								if len(modeLines) > 0 {
-									mode = strings.TrimSpace(modeLines[0])
+				// Clocks
+				if details.CurrentClock == "" {
+					// 1. AMD pp_dpm_sclk
+					sclkPath := fmt.Sprintf("%s/pp_dpm_sclk", devicePath)
+					if sclkBytes, errS := os.ReadFile(sclkPath); errS == nil {
+						sLines := strings.Split(strings.TrimSpace(string(sclkBytes)), "\n")
+						var curClk, minClk, maxClk string
+						if len(sLines) > 0 {
+							parts0 := strings.Split(sLines[0], ":")
+							if len(parts0) > 1 {
+								minClk = strings.TrimSpace(parts0[1])
+							}
+							partsLast := strings.Split(sLines[len(sLines)-1], ":")
+							if len(partsLast) > 1 {
+								maxClk = strings.TrimSpace(strings.TrimSuffix(partsLast[1], "*"))
+							}
+							for _, sl := range sLines {
+								if strings.Contains(sl, "*") {
+									parts := strings.Split(sl, ":")
+									if len(parts) > 1 {
+										curClk = strings.TrimSpace(strings.TrimSuffix(parts[1], "*"))
+									}
 								}
 							}
-							if mode != "" {
-								displays = append(displays, fmt.Sprintf("%s (%s, Connected)", connectorName, mode))
+						}
+						if curClk != "" {
+							if minClk != "" && maxClk != "" && minClk != maxClk {
+								details.CurrentClock = fmt.Sprintf("%s (Min: %s │ Max: %s)", curClk, minClk, maxClk)
 							} else {
-								displays = append(displays, fmt.Sprintf("%s (Connected)", connectorName))
+								details.CurrentClock = curClk
+							}
+						}
+					}
+
+					// 2. Intel iGPU / Arc / Xe sysfs
+					if details.CurrentClock == "" {
+						var curFreq, maxFreq, minFreq []byte
+						curFreq, _ = os.ReadFile(fmt.Sprintf("%s/drm/%s/gt/gt0/rps_act_freq_mhz", devicePath, bestCard))
+						if len(curFreq) == 0 {
+							curFreq, _ = os.ReadFile(fmt.Sprintf("%s/drm/%s/gt_act_freq_mhz", devicePath, bestCard))
+						}
+						if len(curFreq) == 0 {
+							curFreq, _ = os.ReadFile(fmt.Sprintf("%s/drm/%s/gt_cur_freq_mhz", devicePath, bestCard))
+						}
+						if len(curFreq) == 0 {
+							curFreq, _ = os.ReadFile(fmt.Sprintf("%s/tile0/gt0/freq0/act_freq", devicePath))
+						}
+
+						maxFreq, _ = os.ReadFile(fmt.Sprintf("%s/drm/%s/gt/gt0/rps_max_freq_mhz", devicePath, bestCard))
+						if len(maxFreq) == 0 {
+							maxFreq, _ = os.ReadFile(fmt.Sprintf("%s/drm/%s/gt_max_freq_mhz", devicePath, bestCard))
+						}
+						minFreq, _ = os.ReadFile(fmt.Sprintf("%s/drm/%s/gt/gt0/rps_min_freq_mhz", devicePath, bestCard))
+						if len(minFreq) == 0 {
+							minFreq, _ = os.ReadFile(fmt.Sprintf("%s/drm/%s/gt_min_freq_mhz", devicePath, bestCard))
+						}
+
+						cStr := strings.TrimSpace(string(curFreq))
+						maxStr := strings.TrimSpace(string(maxFreq))
+						minStr := strings.TrimSpace(string(minFreq))
+						if cStr != "" {
+							if maxStr != "" && minStr != "" {
+								details.CurrentClock = fmt.Sprintf("%s MHz (Min: %s MHz │ Max: %s MHz)", cStr, minStr, maxStr)
+							} else if maxStr != "" {
+								details.CurrentClock = fmt.Sprintf("%s MHz (Max: %s MHz)", cStr, maxStr)
+							} else {
+								details.CurrentClock = fmt.Sprintf("%s MHz", cStr)
+							}
+						}
+					}
+
+					// 3. Fallback: hwmon freq1_input
+					if details.CurrentClock == "" {
+						hwmonDir := fmt.Sprintf("%s/hwmon", devicePath)
+						if hwFiles, errH := os.ReadDir(hwmonDir); errH == nil {
+							for _, hf := range hwFiles {
+								if strings.HasPrefix(hf.Name(), "hwmon") {
+									freqBytes, errF := os.ReadFile(fmt.Sprintf("%s/%s/freq1_input", hwmonDir, hf.Name()))
+									if errF == nil {
+										if fVal, errP := strconv.ParseFloat(strings.TrimSpace(string(freqBytes)), 64); errP == nil && fVal > 0 {
+											details.CurrentClock = fmt.Sprintf("%.0f MHz", fVal/1000000.0)
+											break
+										}
+									}
+								}
 							}
 						}
 					}
 				}
-				if len(displays) > 0 {
-					details.ActiveDisplays = strings.Join(displays, ", ")
+
+				// Power consumption (AMD & Intel hwmon)
+				hwmonDir := fmt.Sprintf("%s/hwmon", devicePath)
+				if hwFiles, errH := os.ReadDir(hwmonDir); errH == nil {
+					for _, hf := range hwFiles {
+						if strings.HasPrefix(hf.Name(), "hwmon") {
+							base := fmt.Sprintf("%s/%s", hwmonDir, hf.Name())
+							pBytes, errP := os.ReadFile(fmt.Sprintf("%s/power1_average", base))
+							if errP != nil {
+								pBytes, _ = os.ReadFile(fmt.Sprintf("%s/power1_input", base))
+							}
+							if len(pBytes) > 0 {
+								if pVal, errParse := strconv.ParseFloat(strings.TrimSpace(string(pBytes)), 64); errParse == nil && pVal > 0 {
+									watts := pVal / 1000000.0
+									capBytes, errC := os.ReadFile(fmt.Sprintf("%s/power1_cap", base))
+									if errC == nil {
+										if capVal, errCap := strconv.ParseFloat(strings.TrimSpace(string(capBytes)), 64); errCap == nil && capVal > 0 {
+											capWatts := capVal / 1000000.0
+											if details.PowerState != "" {
+												details.PowerState = fmt.Sprintf("%s (%.1f W / %.1f W)", details.PowerState, watts, capWatts)
+											} else {
+												details.PowerState = fmt.Sprintf("D0 (%.1f W / %.1f W)", watts, capWatts)
+											}
+										}
+									}
+									if !strings.Contains(details.PowerState, "W") {
+										if details.PowerState != "" {
+											details.PowerState = fmt.Sprintf("%s (%.1f W)", details.PowerState, watts)
+										} else {
+											details.PowerState = fmt.Sprintf("D0 (%.1f W)", watts)
+										}
+									}
+									break
+								}
+							}
+						}
+					}
+				}
+
+				// Displays & Monitors
+				if details.ActiveDisplays == "" {
+					var displays []string
+					for _, subF := range files {
+						if strings.HasPrefix(subF.Name(), bestCard+"-") {
+							connectorName := strings.TrimPrefix(subF.Name(), bestCard+"-")
+							statusBytes, errSt := os.ReadFile(fmt.Sprintf("/sys/class/drm/%s/status", subF.Name()))
+							if errSt == nil && strings.TrimSpace(string(statusBytes)) == "connected" {
+								modesBytes, _ := os.ReadFile(fmt.Sprintf("/sys/class/drm/%s/modes", subF.Name()))
+								mode := ""
+								if len(modesBytes) > 0 {
+									modeLines := strings.Split(strings.TrimSpace(string(modesBytes)), "\n")
+									if len(modeLines) > 0 {
+										mode = strings.TrimSpace(modeLines[0])
+									}
+								}
+								if mode != "" {
+									displays = append(displays, fmt.Sprintf("%s (%s, Connected)", connectorName, mode))
+								} else {
+									displays = append(displays, fmt.Sprintf("%s (Connected)", connectorName))
+								}
+							}
+						}
+					}
+					if len(displays) > 0 {
+						details.ActiveDisplays = strings.Join(displays, ", ")
+					}
 				}
 
 				// VRAM (AMD / Sysfs)
-				vramUsedPath := fmt.Sprintf("%s/mem_info_vram_used", devicePath)
-				vramTotalPath := fmt.Sprintf("%s/mem_info_vram_total", devicePath)
-				if uBytes, errU := os.ReadFile(vramUsedPath); errU == nil {
-					if tBytes, errT := os.ReadFile(vramTotalPath); errT == nil {
-						uVal, err1 := strconv.ParseUint(strings.TrimSpace(string(uBytes)), 10, 64)
-						tVal, err2 := strconv.ParseUint(strings.TrimSpace(string(tBytes)), 10, 64)
-						if err1 == nil && err2 == nil && tVal > 0 {
-							details.VRAMUsed = FormatBytes(uVal)
-							details.VRAMTotal = FormatBytes(tVal)
-							if tVal >= uVal {
-								details.VRAMFree = FormatBytes(tVal - uVal)
+				if details.VRAMTotal == "" {
+					vramUsedPath := fmt.Sprintf("%s/mem_info_vram_used", devicePath)
+					vramTotalPath := fmt.Sprintf("%s/mem_info_vram_total", devicePath)
+					if uBytes, errU := os.ReadFile(vramUsedPath); errU == nil {
+						if tBytes, errT := os.ReadFile(vramTotalPath); errT == nil {
+							uVal, err1 := strconv.ParseUint(strings.TrimSpace(string(uBytes)), 10, 64)
+							tVal, err2 := strconv.ParseUint(strings.TrimSpace(string(tBytes)), 10, 64)
+							if err1 == nil && err2 == nil && tVal > 0 {
+								details.VRAMUsed = FormatBytes(uVal)
+								details.VRAMTotal = FormatBytes(tVal)
+								if tVal >= uVal {
+									details.VRAMFree = FormatBytes(tVal - uVal)
+								}
+								if details.VRAMType == "" {
+									details.VRAMType = "Dedicated VRAM"
+								}
+							}
+						}
+					}
+
+					// Intel Arc discrete VRAM (lmem)
+					if details.VRAMTotal == "" {
+						lmemBytes, errL := os.ReadFile(fmt.Sprintf("%s/lmem_total_bytes", devicePath))
+						if errL == nil {
+							if lVal, errParse := strconv.ParseUint(strings.TrimSpace(string(lmemBytes)), 10, 64); errParse == nil && lVal > 0 {
+								details.VRAMTotal = FormatBytes(lVal)
+								details.VRAMType = "Dedicated GDDR6"
 							}
 						}
 					}
 				}
 
 				// Temperature
-				if temp := getAMDOrIntelTemp(bestCard); temp > 0 {
-					details.Temperature = fmt.Sprintf("%.1f °C", temp)
+				if details.Temperature == "" {
+					if tempStr := getAMDOrIntelTempFormatted(bestCard); tempStr != "" {
+						details.Temperature = tempStr
+					}
 				}
 			}
 		}
 
-		// Fallback/Override if nvidia-smi is available
-		if nvidia, err := getNvidiaGPUMetrics(); err == nil && nvidia.HasGPU {
-			details.Vendor = "Nvidia"
-			details.VRAMUsed = fmt.Sprintf("%d MB", nvidia.GPUMemUsed)
-			details.VRAMTotal = fmt.Sprintf("%d MB", nvidia.GPUMemTotal)
-			if nvidia.GPUMemTotal >= nvidia.GPUMemUsed {
-				details.VRAMFree = fmt.Sprintf("%d MB", nvidia.GPUMemTotal-nvidia.GPUMemUsed)
+		// Raspberry Pi / ARM SoC fallback
+		if details.CurrentClock == "" || details.Temperature == "" {
+			if out := runCommand("vcgencmd", "measure_temp"); strings.HasPrefix(out, "temp=") {
+				details.Temperature = strings.TrimPrefix(out, "temp=")
 			}
-			details.Temperature = fmt.Sprintf("%.1f °C", nvidia.GPUTemp)
-			cmd := exec.Command("nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader")
-			if out, err := cmd.Output(); err == nil {
-				details.Driver = "Nvidia Proprietary"
-				details.DriverVersion = strings.TrimSpace(string(out))
+			if out := runCommand("vcgencmd", "measure_clock", "core"); strings.Contains(out, "=") {
+				parts := strings.Split(out, "=")
+				if len(parts) > 1 {
+					if hz, err := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64); err == nil && hz > 0 {
+						details.CurrentClock = fmt.Sprintf("%.0f MHz", hz/1000000.0)
+					}
+				}
+			}
+			if details.VRAMTotal == "" {
+				if out := runCommand("vcgencmd", "get_mem", "gpu"); strings.HasPrefix(out, "gpu=") {
+					details.VRAMTotal = strings.TrimPrefix(out, "gpu=")
+					details.VRAMType = "Shared System Memory"
+				}
 			}
 		}
 	} else if runtime.GOOS == "windows" {
-		cmd := exec.Command("wmic", "path", "win32_VideoController", "get", "AdapterRAM,DriverVersion,VideoProcessor,Name")
-		if out, err := cmd.Output(); err == nil {
-			lines := strings.Split(string(out), "\n")
-			if len(lines) > 1 {
-				fields := strings.Fields(lines[1])
-				if len(fields) >= 2 {
-					if ramBytes, err := strconv.ParseUint(fields[0], 10, 64); err == nil && ramBytes > 0 {
-						details.VRAMTotal = FormatBytes(ramBytes)
-					}
-					details.DriverVersion = fields[1]
-				}
+		// 1. Check if Nvidia GPU with nvidia-smi
+		if nName, nVer, nBus, nTot, nUsed, nFree, nTemp, nPwr, nClk, nDisp, ok := getNvidiaDetails(); ok {
+			if nName != "" {
+				details.Name = nName
 			}
-		}
-		lowerName := strings.ToLower(details.Name)
-		if strings.Contains(lowerName, "nvidia") {
 			details.Vendor = "Nvidia"
-			if nvidia, err := getNvidiaGPUMetrics(); err == nil && nvidia.HasGPU {
-				details.VRAMUsed = fmt.Sprintf("%d MB", nvidia.GPUMemUsed)
-				details.VRAMTotal = fmt.Sprintf("%d MB", nvidia.GPUMemTotal)
-				if nvidia.GPUMemTotal >= nvidia.GPUMemUsed {
-					details.VRAMFree = fmt.Sprintf("%d MB", nvidia.GPUMemTotal-nvidia.GPUMemUsed)
-				}
-				details.Temperature = fmt.Sprintf("%.1f °C", nvidia.GPUTemp)
+			details.Driver = "Nvidia Proprietary"
+			if nVer != "" {
+				details.DriverVersion = nVer
 			}
-		} else if strings.Contains(lowerName, "amd") || strings.Contains(lowerName, "radeon") {
-			details.Vendor = "AMD"
-		} else if strings.Contains(lowerName, "intel") {
-			details.Vendor = "Intel"
+			if nBus != "" {
+				details.PCIBus = nBus
+			}
+			if nTot != "" {
+				details.VRAMTotal = nTot
+				details.VRAMUsed = nUsed
+				details.VRAMFree = nFree
+			}
+			if nTemp != "" {
+				details.Temperature = nTemp
+			}
+			if nPwr != "" {
+				details.PowerState = nPwr
+			}
+			if nClk != "" {
+				details.CurrentClock = nClk
+			}
+			if nDisp != "" && details.ActiveDisplays == "" {
+				details.ActiveDisplays = nDisp
+			}
 		}
+
+		// 2. Query Windows WMI / CIM for GPU details (AMD, Intel, Nvidia, Qualcomm)
+		getWindowsGPUDetails(details)
+
+		// 3. DirectX
 		details.DirectX = "DirectX 12"
 	} else if runtime.GOOS == "darwin" {
-		cmd := exec.Command("system_profiler", "SPDisplaysDataType")
-		if out, err := cmd.Output(); err == nil {
-			lines := strings.Split(string(out), "\n")
-			for _, line := range lines {
-				lineLower := strings.ToLower(line)
-				if strings.Contains(lineLower, "vendor:") {
-					details.Vendor = strings.TrimSpace(strings.SplitN(line, ":", 2)[1])
-				} else if strings.Contains(lineLower, "vram (total):") {
-					details.VRAMTotal = strings.TrimSpace(strings.SplitN(line, ":", 2)[1])
-				} else if strings.Contains(lineLower, "metal:") {
-					details.Metal = strings.TrimSpace(strings.SplitN(line, ":", 2)[1])
-				}
-			}
-		}
+		getDarwinGPUDetails(details)
+	} else if runtime.GOOS == "freebsd" || runtime.GOOS == "openbsd" || runtime.GOOS == "netbsd" {
+		getBSDGPUDetails(details)
 	}
 
 	if details.Vendor == "" {
@@ -3750,10 +4443,16 @@ func GetGPUDetails() *GPUDetails {
 			details.Vendor = "Intel"
 		} else if strings.Contains(lower, "nvidia") || strings.Contains(lower, "geforce") {
 			details.Vendor = "Nvidia"
-		} else if strings.Contains(lower, "amd") || strings.Contains(lower, "radeon") {
+		} else if strings.Contains(lower, "amd") || strings.Contains(lower, "radeon") || strings.Contains(lower, "ati") {
 			details.Vendor = "AMD"
 		} else if strings.Contains(lower, "apple") {
 			details.Vendor = "Apple"
+		} else if strings.Contains(lower, "broadcom") || strings.Contains(lower, "videocore") {
+			details.Vendor = "Broadcom"
+		} else if strings.Contains(lower, "qualcomm") || strings.Contains(lower, "adreno") {
+			details.Vendor = "Qualcomm"
+		} else if strings.Contains(lower, "arm") || strings.Contains(lower, "mali") {
+			details.Vendor = "ARM"
 		}
 	}
 

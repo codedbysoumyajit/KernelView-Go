@@ -920,6 +920,13 @@ var GPULogos = map[string][]string{
 		" / _ \\|  _/  _/ |__| _| ",
 		"/_/ \\_\\_| |_| |____|___|",
 	},
+	"broadcom": {
+		" ____  ____   ___    _    ____   ____ ___  __  __ ",
+		"| __ )|  _ \\ / _ \\  / \\  |  _ \\ / ___/ _ \\|  \\/  |",
+		"|  _ \\| |_) | | | |/ _ \\ | | | | |  | | | | |\\/| |",
+		"| |_) |  _ <| |_| / ___ \\| |_| | |__| |_| | |  | |",
+		"|____/|_| \\_\\\\___/_/   \\_\\____/ \\____\\___/|_|  |_|",
+	},
 	"generic": {
 		"  ____ ____  _   _ ",
 		" / ___|  _ \\| | | |",
@@ -932,17 +939,19 @@ var GPULogos = map[string][]string{
 // DisplayGPUInfo formats and prints detailed GPU and graphics API information (exported).
 func DisplayGPUInfo(info *gather.GPUDetails, theme Theme) {
 	vendorKey := strings.ToLower(info.Vendor)
-	if strings.Contains(vendorKey, "nvidia") {
+	if strings.Contains(vendorKey, "nvidia") || strings.Contains(vendorKey, "geforce") {
 		vendorKey = "nvidia"
 	} else if strings.Contains(vendorKey, "intel") {
 		vendorKey = "intel"
-	} else if strings.Contains(vendorKey, "amd") || strings.Contains(vendorKey, "advanced micro") || strings.Contains(vendorKey, "radeon") {
+	} else if strings.Contains(vendorKey, "amd") || strings.Contains(vendorKey, "advanced micro") || strings.Contains(vendorKey, "radeon") || strings.Contains(vendorKey, "ati") {
 		vendorKey = "amd"
-	} else if strings.Contains(vendorKey, "qualcomm") {
+	} else if strings.Contains(vendorKey, "qualcomm") || strings.Contains(vendorKey, "adreno") {
 		vendorKey = "qualcomm"
 	} else if strings.Contains(vendorKey, "apple") {
 		vendorKey = "apple"
-	} else if strings.Contains(vendorKey, "arm") {
+	} else if strings.Contains(vendorKey, "broadcom") || strings.Contains(vendorKey, "videocore") {
+		vendorKey = "broadcom"
+	} else if strings.Contains(vendorKey, "arm") || strings.Contains(vendorKey, "mali") {
 		vendorKey = "arm"
 	} else if strings.Contains(vendorKey, "samsung") {
 		vendorKey = "samsung"
@@ -950,16 +959,20 @@ func DisplayGPUInfo(info *gather.GPUDetails, theme Theme) {
 
 	if vendorKey == "" || vendorKey == "unknown" {
 		lowerName := strings.ToLower(info.Name)
-		if strings.Contains(lowerName, "nvidia") {
+		if strings.Contains(lowerName, "nvidia") || strings.Contains(lowerName, "geforce") {
 			vendorKey = "nvidia"
 		} else if strings.Contains(lowerName, "intel") {
 			vendorKey = "intel"
-		} else if strings.Contains(lowerName, "amd") || strings.Contains(lowerName, "radeon") {
+		} else if strings.Contains(lowerName, "amd") || strings.Contains(lowerName, "radeon") || strings.Contains(lowerName, "ati") {
 			vendorKey = "amd"
 		} else if strings.Contains(lowerName, "apple") {
 			vendorKey = "apple"
-		} else if strings.Contains(lowerName, "qualcomm") {
+		} else if strings.Contains(lowerName, "broadcom") || strings.Contains(lowerName, "videocore") {
+			vendorKey = "broadcom"
+		} else if strings.Contains(lowerName, "qualcomm") || strings.Contains(lowerName, "adreno") {
 			vendorKey = "qualcomm"
+		} else if strings.Contains(lowerName, "arm") || strings.Contains(lowerName, "mali") {
+			vendorKey = "arm"
 		}
 	}
 
@@ -995,6 +1008,14 @@ func DisplayGPUInfo(info *gather.GPUDetails, theme Theme) {
 				Key:      "\033[38;5;208m", // Qualcomm Orange
 				Value:    "\033[38;5;249m", // Light Gray
 				Accent:   "\033[38;5;208m", // Qualcomm Orange
+				Reset:    "\033[0m",
+			}
+		case "broadcom":
+			theme = Theme{
+				Category: "\033[31m",       // Red
+				Key:      "\033[38;5;196m", // Red
+				Value:    "\033[38;5;249m", // Light Gray
+				Accent:   "\033[38;5;196m", // Red
 				Reset:    "\033[0m",
 			}
 		case "arm":
