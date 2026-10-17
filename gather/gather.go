@@ -20,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/shirou/gopsutil/v3/cpu"
 	"github.com/shirou/gopsutil/v3/disk"
@@ -157,33 +158,34 @@ func runCommand(name string, arg ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
-func runShellCommand(command string) string {
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
-	var cmd *exec.Cmd
-	if runtime.GOOS == "windows" {
-		cmd = exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command", command)
-	} else {
-		cmd = exec.CommandContext(ctx, "sh", "-c", command)
-	}
-	cmd.Stderr = nil
-	out, err := cmd.Output()
-	if err != nil {
+func titleCase(s string) string {
+	if s == "" {
 		return ""
 	}
-	return strings.TrimSpace(string(out))
+	words := strings.Fields(s)
+	for i, w := range words {
+		runes := []rune(w)
+		for j, r := range runes {
+			if unicode.IsLetter(r) {
+				runes[j] = unicode.ToUpper(r)
+				break
+			}
+		}
+		words[i] = string(runes)
+	}
+	return strings.Join(words, " ")
 }
 
 // FormatBytes formats a byte count into a human-readable string (Exported)
 func FormatBytes(b uint64) string {
-	if b > (1 << 30) {
+	if b >= (1 << 30) {
 		return fmt.Sprintf("%.1f GB", float64(b)/(1<<30))
 	}
-	if b > (1 << 20) {
+	if b >= (1 << 20) {
 		return fmt.Sprintf("%.1f MB", float64(b)/(1<<20))
 	}
-	if b > (1 << 10) {
-		return fmt.Sprintf("%.0f KB", float64(b)/(1<<10))
+	if b >= (1 << 10) {
+		return fmt.Sprintf("%.1f KB", float64(b)/(1<<10))
 	}
 	return fmt.Sprintf("%d B", b)
 }
@@ -342,7 +344,7 @@ func gatherHostInfo(info *SystemInfo, wg *sync.WaitGroup) {
 	if kernelName == "windows" {
 		kernelName = "Windows NT"
 	}
-	info.Kernel = fmt.Sprintf("%s %s", strings.Title(kernelName), h.KernelVersion)
+	info.Kernel = fmt.Sprintf("%s %s", titleCase(kernelName), h.KernelVersion)
 	info.Hostname, _ = os.Hostname()
 }
 
@@ -685,7 +687,7 @@ func getShell() string {
 		}
 	}
 
-	titleName := strings.Title(shellName)
+	titleName := titleCase(shellName)
 	if version != "" {
 		return fmt.Sprintf("%s %s", titleName, version)
 	}
@@ -932,51 +934,56 @@ func getIPAddress() string {
 }
 
 func getLinuxResolution() string {
-	if os.Getenv("DISPLAY") == "" {
-		if os.Getenv("WAYLAND_DISPLAY") != "" {
-			files, err := os.ReadDir("/sys/class/drm")
-			if err == nil {
-				for _, f := range files {
-					if strings.HasPrefix(f.Name(), "card") && !strings.Contains(f.Name(), "-") {
-						outputs, err := os.ReadDir("/sys/class/drm/" + f.Name())
-						if err == nil {
-							for _, out := range outputs {
-								if strings.Contains(out.Name(), "-") {
-									modeFile := "/sys/class/drm/" + f.Name() + "/" + out.Name() + "/modes"
-									if content, err := os.ReadFile(modeFile); err == nil {
-										lines := strings.Split(string(content), "\n")
-										if len(lines) > 0 && lines[0] != "" {
-											return strings.TrimSpace(lines[0])
-										}
-									}
-								}
-							}
-						}
+	// 1. Direct DRM sysfs connector inspection (Universal across Wayland, X11, GNOME, KDE, Sway, etc.)
+	if files, err := os.ReadDir("/sys/class/drm"); err == nil {
+		var resolutions []string
+		for _, f := range files {
+			name := f.Name()
+			if strings.HasPrefix(name, "card") && strings.Contains(name, "-") {
+				statusBytes, errSt := os.ReadFile("/sys/class/drm/" + name + "/status")
+				if errSt != nil || strings.TrimSpace(string(statusBytes)) != "connected" {
+					continue
+				}
+				modesBytes, errM := os.ReadFile("/sys/class/drm/" + name + "/modes")
+				if errM == nil && len(modesBytes) > 0 {
+					lines := strings.Split(strings.TrimSpace(string(modesBytes)), "\n")
+					if len(lines) > 0 && lines[0] != "" {
+						resolutions = append(resolutions, strings.TrimSpace(lines[0]))
 					}
 				}
 			}
-			return "Wayland (Generic)"
 		}
-		return "Headless"
+		if len(resolutions) > 0 {
+			return strings.Join(resolutions, ", ")
+		}
 	}
-	cmd := exec.Command("xrandr", "--current")
-	out, err := cmd.Output()
-	if err != nil {
-		return ""
+
+	// 2. Framebuffer sysfs fallback
+	if fbModes, err := os.ReadFile("/sys/class/graphics/fb0/virtual_size"); err == nil {
+		s := strings.TrimSpace(string(fbModes))
+		if s != "" {
+			return strings.Replace(s, ",", "x", 1)
+		}
 	}
-	lines := strings.Split(string(out), "\n")
-	for _, line := range lines {
-		if strings.Contains(line, "*") {
-			fields := strings.Fields(line)
-			if len(fields) > 0 {
-				return fields[0]
+
+	// 3. Fallback: xrandr (if available on X11 / Xwayland)
+	if out := runCommand("xrandr", "--current"); out != "" {
+		lines := strings.Split(out, "\n")
+		for _, line := range lines {
+			if strings.Contains(line, "*") {
+				fields := strings.Fields(line)
+				if len(fields) > 0 {
+					return fields[0]
+				}
 			}
 		}
 	}
+
 	return ""
 }
 
 func getResolution() string {
+	var res string
 	switch runtime.GOOS {
 	case "windows":
 		out := runCommand("wmic", "path", "Win32_VideoController", "get", "CurrentHorizontalResolution,CurrentVerticalResolution")
@@ -985,16 +992,19 @@ func getResolution() string {
 			for _, l := range lines {
 				f := strings.Fields(l)
 				if len(f) == 2 && f[0] != "CurrentHorizontalResolution" {
-					return fmt.Sprintf("%sx%s", f[0], f[1])
+					res = fmt.Sprintf("%sx%s", f[0], f[1])
+					break
 				}
 			}
 		}
-		output := runCommand("powershell", "-NoProfile", "-NonInteractive", "-Command", "(Get-CimInstance Win32_VideoController).CurrentHorizontalResolution,(Get-CimInstance Win32_VideoController).CurrentVerticalResolution -join 'x'")
-		if output != "" {
-			return strings.TrimSpace(output)
+		if res == "" {
+			output := runCommand("powershell", "-NoProfile", "-NonInteractive", "-Command", "(Get-CimInstance Win32_VideoController).CurrentHorizontalResolution,(Get-CimInstance Win32_VideoController).CurrentVerticalResolution -join 'x'")
+			if output != "" {
+				res = strings.TrimSpace(output)
+			}
 		}
 	case "linux":
-		return getLinuxResolution()
+		res = getLinuxResolution()
 	case "darwin":
 		out := runCommand("system_profiler", "SPDisplaysDataType")
 		if out != "" {
@@ -1005,15 +1015,20 @@ func getResolution() string {
 					if len(parts) == 2 {
 						fields := strings.Fields(parts[1])
 						if len(fields) >= 3 {
-							return fmt.Sprintf("%s x %s", fields[0], fields[2])
+							res = fmt.Sprintf("%s x %s", fields[0], fields[2])
+							break
 						}
-						return strings.TrimSpace(parts[1])
+						res = strings.TrimSpace(parts[1])
+						break
 					}
 				}
 			}
 		}
 	}
-	return "Unknown"
+	if res == "" {
+		return "Unknown"
+	}
+	return res
 }
 
 func getLinuxTerminal() string {
@@ -1097,7 +1112,7 @@ func getLinuxTerminal() string {
 			if strings.HasSuffix(lowerName, "terminal") || strings.HasSuffix(lowerName, "term") || strings.Contains(lowerName, "terminal-server") {
 				cleanName := strings.TrimSuffix(lowerName, "-server")
 				cleanName = strings.TrimSuffix(cleanName, "-gui")
-				return strings.Title(cleanName)
+				return titleCase(cleanName)
 			}
 		}
 
@@ -1115,7 +1130,7 @@ func getTerminal() string {
 	if termProg != "" {
 		termProg = strings.TrimSuffix(termProg, ".app")
 		termProg = strings.Replace(termProg, "iTerm", "iTerm2", 1)
-		return strings.Title(termProg)
+		return titleCase(termProg)
 	}
 
 	// 2. Check specific env variables set by terminal emulators
@@ -1170,7 +1185,7 @@ func getLinuxWM() string {
 		if strings.Contains(lowerSession, "lxqt") {
 			return "Openbox"
 		}
-		return strings.Title(desktopSession)
+		return titleCase(desktopSession)
 	}
 	cmd := exec.Command("wmctrl", "-m")
 	if out, err := cmd.Output(); err == nil {
@@ -1245,7 +1260,7 @@ func getDesktopEnvironment() string {
 	}
 	de = strings.Replace(de, "plasmawayland", "Plasma (Wayland)", 1)
 	de = strings.Replace(de, "plasma", "Plasma (X11)", 1)
-	return strings.Title(de)
+	return titleCase(de)
 }
 
 func readSQLiteVarint(b []byte) (uint64, int) {
@@ -1755,10 +1770,6 @@ func GetPackageCounts() string {
 	return strings.Join(results, ", ")
 }
 
-func getPackageCounts() string {
-	return GetPackageCounts()
-}
-
 func getDisk() string {
 	d, err := disk.Usage("/")
 	if err != nil {
@@ -1826,58 +1837,66 @@ func cleanISPName(raw string) string {
 }
 
 func getPublicIPInfo() (ip, isp, city, country string, err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2500*time.Millisecond)
+	defer cancel()
+
 	client := http.Client{
-		Timeout: 2000 * time.Millisecond,
 		Transport: &http.Transport{
 			DisableKeepAlives: true,
 		},
 	}
 
 	// Provider 1: ipinfo.io (HTTPS, detailed and reliable)
-	req1, _ := http.NewRequest("GET", "https://ipinfo.io/json", nil)
-	req1.Header.Set("User-Agent", "KernelView-Go")
-	resp1, err1 := client.Do(req1)
-	if err1 == nil {
-		defer resp1.Body.Close()
-		var ipInfo struct {
-			IP      string `json:"ip"`
-			City    string `json:"city"`
-			Region  string `json:"region"`
-			Country string `json:"country"`
-			Org     string `json:"org"`
-		}
-		if errDecode := json.NewDecoder(io.LimitReader(resp1.Body, 64*1024)).Decode(&ipInfo); errDecode == nil && ipInfo.IP != "" {
-			c := ipInfo.City
-			if ipInfo.Region != "" && ipInfo.Region != ipInfo.City {
-				c = fmt.Sprintf("%s, %s", ipInfo.City, ipInfo.Region)
+	req1, errReq1 := http.NewRequestWithContext(ctx, "GET", "https://ipinfo.io/json", nil)
+	if errReq1 == nil {
+		req1.Header.Set("User-Agent", "KernelView-Go")
+		if resp1, err1 := client.Do(req1); err1 == nil {
+			var ipInfo struct {
+				IP      string `json:"ip"`
+				City    string `json:"city"`
+				Region  string `json:"region"`
+				Country string `json:"country"`
+				Org     string `json:"org"`
 			}
-			return ipInfo.IP, cleanISPName(ipInfo.Org), c, ipInfo.Country, nil
+			errDecode := json.NewDecoder(io.LimitReader(resp1.Body, 64*1024)).Decode(&ipInfo)
+			resp1.Body.Close()
+			if errDecode == nil && ipInfo.IP != "" {
+				c := ipInfo.City
+				if ipInfo.Region != "" && ipInfo.Region != ipInfo.City {
+					c = fmt.Sprintf("%s, %s", ipInfo.City, ipInfo.Region)
+				}
+				return ipInfo.IP, cleanISPName(ipInfo.Org), c, ipInfo.Country, nil
+			}
 		}
 	}
 
 	// Provider 2: ip-api.com (fallback)
-	req2, _ := http.NewRequest("GET", "https://ip-api.com/json/", nil)
-	req2.Header.Set("User-Agent", "KernelView-Go")
-	resp2, err2 := client.Do(req2)
-	if err2 == nil {
-		defer resp2.Body.Close()
-		var apiResp ipAPIResponse
-		if errDecode := json.NewDecoder(io.LimitReader(resp2.Body, 64*1024)).Decode(&apiResp); errDecode == nil && apiResp.Status == "success" {
-			return apiResp.Query, apiResp.ISP, apiResp.City, apiResp.Country, nil
+	req2, errReq2 := http.NewRequestWithContext(ctx, "GET", "https://ip-api.com/json/", nil)
+	if errReq2 == nil {
+		req2.Header.Set("User-Agent", "KernelView-Go")
+		if resp2, err2 := client.Do(req2); err2 == nil {
+			var apiResp ipAPIResponse
+			errDecode := json.NewDecoder(io.LimitReader(resp2.Body, 64*1024)).Decode(&apiResp)
+			resp2.Body.Close()
+			if errDecode == nil && apiResp.Status == "success" {
+				return apiResp.Query, apiResp.ISP, apiResp.City, apiResp.Country, nil
+			}
 		}
 	}
 
 	// Provider 3: api.ipify.org (minimal fallback)
-	req3, _ := http.NewRequest("GET", "https://api.ipify.org?format=json", nil)
-	req3.Header.Set("User-Agent", "KernelView-Go")
-	resp3, err3 := client.Do(req3)
-	if err3 == nil {
-		defer resp3.Body.Close()
-		var ipifyResp struct {
-			IP string `json:"ip"`
-		}
-		if errDecode := json.NewDecoder(io.LimitReader(resp3.Body, 16*1024)).Decode(&ipifyResp); errDecode == nil && ipifyResp.IP != "" {
-			return ipifyResp.IP, "Unknown ISP", "Unknown City", "Unknown Country", nil
+	req3, errReq3 := http.NewRequestWithContext(ctx, "GET", "https://api.ipify.org?format=json", nil)
+	if errReq3 == nil {
+		req3.Header.Set("User-Agent", "KernelView-Go")
+		if resp3, err3 := client.Do(req3); err3 == nil {
+			var ipifyResp struct {
+				IP string `json:"ip"`
+			}
+			errDecode := json.NewDecoder(io.LimitReader(resp3.Body, 16*1024)).Decode(&ipifyResp)
+			resp3.Body.Close()
+			if errDecode == nil && ipifyResp.IP != "" {
+				return ipifyResp.IP, "Unknown ISP", "Unknown City", "Unknown Country", nil
+			}
 		}
 	}
 
@@ -2378,12 +2397,7 @@ func GetSystemInfo(isFast bool) *SystemInfo {
 		},
 		"Disk": getDisk, "IPAddress": getIPAddress,
 		"Locale": getSystemLocale,
-		"Resolution": func() string {
-			if runtime.GOOS == "linux" {
-				return getLinuxResolution()
-			}
-			return getResolution()
-		},
+		"Resolution": getResolution,
 		"WindowManager": func() string {
 			if runtime.GOOS == "linux" {
 				return getLinuxWM()
@@ -2411,7 +2425,7 @@ func GetSystemInfo(isFast bool) *SystemInfo {
 		}
 		slowTaskFuncs := map[string]func() string{
 			"OpenPorts":   getOpenPorts,
-			"Packages":    getPackageCounts,
+			"Packages":    GetPackageCounts,
 			"Languages":   getInstalledLanguages,
 			"Temperature": getTemperatures,
 		}
@@ -2435,26 +2449,33 @@ func GetProcessList() ([]ProcessInfo, error) {
 		return nil, fmt.Errorf("failed to get processes: %w", err)
 	}
 
-	var wg sync.WaitGroup
-	results := make(chan ProcessInfo, len(allProcs))
-	sem := make(chan struct{}, 32) // Limit concurrency to avoid FD exhaustion
+	numWorkers := 16
+	if len(allProcs) < numWorkers {
+		numWorkers = len(allProcs)
+	}
+	if numWorkers < 1 {
+		numWorkers = 1
+	}
 
 	// Step 1: Prime the CPU percent calculation by calling it once on all processes.
+	jobs1 := make(chan *process.Process, len(allProcs))
 	for _, p := range allProcs {
-		if p == nil {
-			continue
+		if p != nil {
+			jobs1 <- p
 		}
+	}
+	close(jobs1)
+
+	var wg sync.WaitGroup
+	for i := 0; i < numWorkers; i++ {
 		wg.Add(1)
-		go func(proc *process.Process) {
+		go func() {
 			defer wg.Done()
 			defer func() { _ = recover() }()
-			if proc == nil {
-				return
+			for proc := range jobs1 {
+				_, _ = proc.CPUPercent()
 			}
-			sem <- struct{}{}
-			_, _ = proc.CPUPercent()
-			<-sem
-		}(p)
+		}()
 	}
 	wg.Wait()
 
@@ -2462,51 +2483,53 @@ func GetProcessList() ([]ProcessInfo, error) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Step 3: Call CPUPercent on the same instances to get the actual CPU usage.
+	jobs2 := make(chan *process.Process, len(allProcs))
 	for _, p := range allProcs {
-		if p == nil {
-			continue
+		if p != nil {
+			jobs2 <- p
 		}
+	}
+	close(jobs2)
+
+	results := make(chan ProcessInfo, len(allProcs))
+	for i := 0; i < numWorkers; i++ {
 		wg.Add(1)
-		go func(proc *process.Process) {
+		go func() {
 			defer wg.Done()
 			defer func() { _ = recover() }()
-			if proc == nil {
-				return
-			}
-			sem <- struct{}{}
-			defer func() { <-sem }()
+			for proc := range jobs2 {
+				pid := proc.Pid
+				name, err := proc.Name()
+				if err != nil || name == "" || pid <= 1 {
+					continue
+				}
 
-			pid := proc.Pid
-			name, err := proc.Name()
-			if err != nil || name == "" || pid <= 1 {
-				return
-			}
+				// Exclude common system/idle processes to keep the list clean
+				if runtime.GOOS == "linux" && (strings.HasPrefix(name, "[") || name == "systemd" || name == "init") {
+					continue
+				}
+				if name == "kernel_task" || name == "idle" {
+					continue
+				}
 
-			// Exclude common system/idle processes to keep the list clean
-			if runtime.GOOS == "linux" && (strings.HasPrefix(name, "[") || name == "systemd" || name == "init") {
-				return
-			}
-			if name == "kernel_task" || name == "idle" {
-				return
-			}
+				cpuPerc, err := proc.CPUPercent()
+				if err != nil {
+					cpuPerc = 0.0
+				}
+				memInfo, errMem := proc.MemoryInfo()
+				memPerc, errMemPerc := proc.MemoryPercent()
 
-			cpuPerc, err := proc.CPUPercent()
-			if err != nil {
-				cpuPerc = 0.0
-			}
-			memInfo, errMem := proc.MemoryInfo()
-			memPerc, errMemPerc := proc.MemoryPercent()
-
-			if errMem == nil && errMemPerc == nil && memInfo != nil {
-				results <- ProcessInfo{
-					PID:     pid,
-					Name:    name,
-					CPU:     cpuPerc,
-					RAM:     memInfo.RSS,
-					RAMPerc: memPerc,
+				if errMem == nil && errMemPerc == nil && memInfo != nil {
+					results <- ProcessInfo{
+						PID:     pid,
+						Name:    name,
+						CPU:     cpuPerc,
+						RAM:     memInfo.RSS,
+						RAMPerc: memPerc,
+					}
 				}
 			}
-		}(p)
+		}()
 	}
 
 	wg.Wait()
@@ -3338,47 +3361,59 @@ func (lt *LiveTracker) scanProcessesAsync() {
 	}
 	lt.mu.Unlock()
 
+	numWorkers := 16
+	if len(procs) < numWorkers {
+		numWorkers = len(procs)
+	}
+	if numWorkers < 1 {
+		numWorkers = 1
+	}
+
+	jobs := make(chan *process.Process, len(procs))
+	for _, p := range procs {
+		jobs <- p
+	}
+	close(jobs)
+
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, 16)
 	results := make(chan ProcessInfo, len(procs))
 
-	for _, proc := range procs {
+	for i := 0; i < numWorkers; i++ {
 		wg.Add(1)
-		go func(p *process.Process) {
+		go func() {
 			defer wg.Done()
 			defer func() { _ = recover() }()
-			sem <- struct{}{}
-			defer func() { <-sem }()
+			for p := range jobs {
+				pid := p.Pid
+				name, err := p.Name()
+				if err != nil || name == "" || pid <= 1 {
+					continue
+				}
+				if runtime.GOOS == "linux" && (strings.HasPrefix(name, "[") || name == "systemd" || name == "init") {
+					continue
+				}
+				if name == "kernel_task" || name == "idle" {
+					continue
+				}
 
-			pid := p.Pid
-			name, err := p.Name()
-			if err != nil || name == "" || pid <= 1 {
-				return
-			}
-			if runtime.GOOS == "linux" && (strings.HasPrefix(name, "[") || name == "systemd" || name == "init") {
-				return
-			}
-			if name == "kernel_task" || name == "idle" {
-				return
-			}
+				cpuPerc, err := p.CPUPercent()
+				if err != nil {
+					cpuPerc = 0.0
+				}
+				memInfo, errMem := p.MemoryInfo()
+				memPerc, errMemPerc := p.MemoryPercent()
 
-			cpuPerc, err := p.CPUPercent()
-			if err != nil {
-				cpuPerc = 0.0
-			}
-			memInfo, errMem := p.MemoryInfo()
-			memPerc, errMemPerc := p.MemoryPercent()
-
-			if errMem == nil && errMemPerc == nil && memInfo != nil {
-				results <- ProcessInfo{
-					PID:     pid,
-					Name:    name,
-					CPU:     cpuPerc,
-					RAM:     memInfo.RSS,
-					RAMPerc: memPerc,
+				if errMem == nil && errMemPerc == nil && memInfo != nil {
+					results <- ProcessInfo{
+						PID:     pid,
+						Name:    name,
+						CPU:     cpuPerc,
+						RAM:     memInfo.RSS,
+						RAMPerc: memPerc,
+					}
 				}
 			}
-		}(proc)
+		}()
 	}
 
 	wg.Wait()
@@ -3407,8 +3442,8 @@ func (lt *LiveTracker) getLinuxDRMGPU() (LiveGPUMetrics, bool) {
 		return LiveGPUMetrics{}, false
 	}
 
-	// 1. Refresh cached DRM fdinfo paths every 4 seconds
-	if time.Since(lt.lastDRMPathsScan) >= 4*time.Second || len(lt.cachedDRMPaths) == 0 {
+	// 1. Refresh cached DRM fdinfo paths if empty or after 15 seconds
+	if time.Since(lt.lastDRMPathsScan) >= 15*time.Second || len(lt.cachedDRMPaths) == 0 {
 		lt.cachedDRMPaths = lt.cachedDRMPaths[:0]
 		entries, err := os.ReadDir("/proc")
 		if err == nil {
@@ -3428,7 +3463,7 @@ func (lt *LiveTracker) getLinuxDRMGPU() (LiveGPUMetrics, bool) {
 					if errOpen != nil {
 						continue
 					}
-					var buf [1024]byte
+					var buf [512]byte
 					n, _ := f.Read(buf[:])
 					f.Close()
 					if n > 0 && bytes.Contains(buf[:n], []byte("drm-driver:")) {
@@ -3450,11 +3485,13 @@ func (lt *LiveTracker) getLinuxDRMGPU() (LiveGPUMetrics, bool) {
 	var totalMemBytes uint64
 	validCount := 0
 
+	validPaths := lt.cachedDRMPaths[:0]
 	for _, p := range lt.cachedDRMPaths {
 		data, err := os.ReadFile(p)
 		if err != nil {
 			continue
 		}
+		validPaths = append(validPaths, p)
 		validCount++
 		lines := bytes.Split(data, []byte("\n"))
 		for _, l := range lines {
@@ -3481,8 +3518,10 @@ func (lt *LiveTracker) getLinuxDRMGPU() (LiveGPUMetrics, bool) {
 			}
 		}
 	}
+	lt.cachedDRMPaths = validPaths
 
 	if validCount == 0 {
+		lt.lastDRMPathsScan = time.Time{} // Force rescan on next tick
 		return LiveGPUMetrics{}, false
 	}
 

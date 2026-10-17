@@ -39,6 +39,7 @@ type LiveDisplay struct {
 	peakTx        float64
 	peakDiskRead  float64
 	peakDiskWrite float64
+	renderBuf     bytes.Buffer
 }
 
 // StartLiveDashboard launches the clean, aesthetic live dashboard
@@ -116,10 +117,18 @@ func StartLiveDashboard(isFast bool) {
 	// Live ticker (350ms with anti-jitter damping)
 	ticker := time.NewTicker(350 * time.Millisecond)
 	defer ticker.Stop()
+	done := make(chan struct{})
+	defer close(done)
+
 	go func() {
 		defer func() { _ = recover() }()
-		for range ticker.C {
-			events <- Event{Type: Tick}
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				events <- Event{Type: Tick}
+			}
 		}
 	}()
 
@@ -222,17 +231,17 @@ func (ld *LiveDisplay) renderWarningScreen(theme Theme) {
 		allRows = allRows[:ld.termHeight]
 	}
 
-	var buf bytes.Buffer
-	buf.WriteString("\033[?2026h\033[H")
+	ld.renderBuf.Reset()
+	ld.renderBuf.WriteString("\033[?2026h\033[H")
 	for i, row := range allRows {
 		if i > 0 {
-			buf.WriteString("\r\n")
+			ld.renderBuf.WriteString("\r\n")
 		}
-		buf.WriteString(row)
-		buf.WriteString("\033[K")
+		ld.renderBuf.WriteString(row)
+		ld.renderBuf.WriteString("\033[K")
 	}
-	buf.WriteString("\033[J\033[?2026l")
-	os.Stdout.Write(buf.Bytes())
+	ld.renderBuf.WriteString("\033[J\033[?2026l")
+	os.Stdout.Write(ld.renderBuf.Bytes())
 }
 
 func (ld *LiveDisplay) render() {
@@ -290,7 +299,7 @@ func (ld *LiveDisplay) render() {
 		contentRows = contentRows[:availableHeight]
 	}
 
-	var allRows []string
+	allRows := make([]string, 0, len(headerRows)+len(contentRows)+len(footerRows))
 	allRows = append(allRows, headerRows...)
 	allRows = append(allRows, contentRows...)
 	allRows = append(allRows, footerRows...)
@@ -299,18 +308,18 @@ func (ld *LiveDisplay) render() {
 		allRows = allRows[:ld.termHeight]
 	}
 
-	var buf bytes.Buffer
-	buf.WriteString("\033[?2026h\033[H")
+	ld.renderBuf.Reset()
+	ld.renderBuf.WriteString("\033[?2026h\033[H")
 	for i, row := range allRows {
 		if i > 0 {
-			buf.WriteString("\r\n")
+			ld.renderBuf.WriteString("\r\n")
 		}
-		buf.WriteString(row)
-		buf.WriteString("\033[K")
+		ld.renderBuf.WriteString(row)
+		ld.renderBuf.WriteString("\033[K")
 	}
-	buf.WriteString("\033[J\033[?2026l")
+	ld.renderBuf.WriteString("\033[J\033[?2026l")
 
-	os.Stdout.Write(buf.Bytes())
+	os.Stdout.Write(ld.renderBuf.Bytes())
 }
 
 // -------------------------------------------------------------
@@ -490,7 +499,12 @@ func (ld *LiveDisplay) renderDashboard(metrics *gather.LiveMetrics, theme Theme,
 		formatKeyVal("GPU", ld.static.GPU, leftW-4, theme),
 		formatKeyVal("Memory", ld.static.RAM, leftW-4, theme),
 		formatKeyVal("DE / WM", wmDe, leftW-4, theme),
-		formatKeyVal("Resolution", ld.static.Resolution, leftW-4, theme),
+		formatKeyVal("Resolution", func() string {
+			if ld.static.Resolution == "" || ld.static.Resolution == "Unknown" {
+				return "N/A"
+			}
+			return ld.static.Resolution
+		}(), leftW-4, theme),
 		formatKeyVal("Shell / Term", fmt.Sprintf("%s / %s", ld.static.Shell, ld.static.Terminal), leftW-4, theme),
 		formatKeyVal("Packages", ld.static.Packages, leftW-4, theme),
 		formatKeyVal("Local IP", ld.static.IPAddress, leftW-4, theme),
