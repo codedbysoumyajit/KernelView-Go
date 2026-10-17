@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"sort"
@@ -2825,6 +2826,11 @@ type LiveTracker struct {
 	// Cached GPU metrics
 	cachedGPUMetrics LiveGPUMetrics
 	lastGPUUpdate    time.Time
+	cachedDRMPaths   []string
+	lastDRMPathsScan time.Time
+	prevDRMEngineNS  uint64
+	prevDRMTime      time.Time
+	smoothedGPUUsage float64
 
 	// Smoothed metrics for visual stability (anti-jitter)
 	smoothedCPU   float64
@@ -3085,15 +3091,41 @@ func (lt *LiveTracker) GetMetrics() (*LiveMetrics, error) {
 	metrics.NetTxTotal = txTotal
 	metrics.NetIface = activeIface
 
-	// 7. GPU Telemetry (cached for 2 seconds)
-	if time.Since(lt.lastGPUUpdate) >= 2*time.Second || lt.lastGPUUpdate.IsZero() {
-		gpuMetrics, err := getGPUMetrics()
-		if err == nil {
-			lt.cachedGPUMetrics = gpuMetrics
+	// 7. GPU Telemetry (Real-time Linux DRM engine tracking with cross-vendor fallback)
+	var gpuMetrics LiveGPUMetrics
+	hasRealtimeDRM := false
+
+	if drmM, ok := lt.getLinuxDRMGPU(); ok {
+		gpuMetrics = drmM
+		hasRealtimeDRM = true
+	}
+
+	if !hasRealtimeDRM {
+		if time.Since(lt.lastGPUUpdate) >= 1*time.Second || lt.lastGPUUpdate.IsZero() {
+			gm, err := getGPUMetrics()
+			if err == nil {
+				lt.cachedGPUMetrics = gm
+			}
 			lt.lastGPUUpdate = time.Now()
 		}
+		gpuMetrics = lt.cachedGPUMetrics
+	} else {
+		// Periodically refresh temperature from hwmon
+		if time.Since(lt.lastGPUUpdate) >= 2*time.Second || lt.lastGPUUpdate.IsZero() {
+			gpuMetrics.GPUTemp = getAMDOrIntelTemp("")
+			lt.cachedGPUMetrics.GPUTemp = gpuMetrics.GPUTemp
+			lt.lastGPUUpdate = time.Now()
+		} else {
+			gpuMetrics.GPUTemp = lt.cachedGPUMetrics.GPUTemp
+		}
+		if gpuMetrics.GPUMemTotal == 0 && metrics.RAMTotal > 0 {
+			gpuMetrics.GPUMemTotal = metrics.RAMTotal / (1024 * 1024)
+			if gpuMetrics.GPUMemTotal > 0 {
+				gpuMetrics.GPUMemUsage = (float64(gpuMetrics.GPUMemUsed) / float64(gpuMetrics.GPUMemTotal)) * 100.0
+			}
+		}
 	}
-	metrics.GPUMetrics = lt.cachedGPUMetrics
+	metrics.GPUMetrics = gpuMetrics
 
 	// 8. Processes (asynchronous background scanning for zero UI delay)
 	if (time.Since(lt.lastProcUpdate) >= 1500*time.Millisecond || len(lt.cachedProcesses) == 0) && !lt.procScanning {
@@ -3370,6 +3402,122 @@ func (lt *LiveTracker) scanProcessesAsync() {
 	lt.mu.Unlock()
 }
 
+func (lt *LiveTracker) getLinuxDRMGPU() (LiveGPUMetrics, bool) {
+	if runtime.GOOS != "linux" {
+		return LiveGPUMetrics{}, false
+	}
+
+	// 1. Refresh cached DRM fdinfo paths every 4 seconds
+	if time.Since(lt.lastDRMPathsScan) >= 4*time.Second || len(lt.cachedDRMPaths) == 0 {
+		lt.cachedDRMPaths = lt.cachedDRMPaths[:0]
+		entries, err := os.ReadDir("/proc")
+		if err == nil {
+			for _, e := range entries {
+				name := e.Name()
+				if len(name) == 0 || name[0] < '0' || name[0] > '9' {
+					continue
+				}
+				fdDir := "/proc/" + name + "/fdinfo"
+				fds, errFd := os.ReadDir(fdDir)
+				if errFd != nil {
+					continue
+				}
+				for _, fd := range fds {
+					fpath := fdDir + "/" + fd.Name()
+					f, errOpen := os.Open(fpath)
+					if errOpen != nil {
+						continue
+					}
+					var buf [1024]byte
+					n, _ := f.Read(buf[:])
+					f.Close()
+					if n > 0 && bytes.Contains(buf[:n], []byte("drm-driver:")) {
+						lt.cachedDRMPaths = append(lt.cachedDRMPaths, fpath)
+					}
+				}
+			}
+		}
+		lt.lastDRMPathsScan = time.Now()
+	}
+
+	if len(lt.cachedDRMPaths) == 0 {
+		return LiveGPUMetrics{}, false
+	}
+
+	// 2. Sample current engine nanoseconds and memory from cached DRM paths
+	now := time.Now()
+	var totalEngineNS uint64
+	var totalMemBytes uint64
+	validCount := 0
+
+	for _, p := range lt.cachedDRMPaths {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		validCount++
+		lines := bytes.Split(data, []byte("\n"))
+		for _, l := range lines {
+			if bytes.HasPrefix(l, []byte("drm-engine-")) {
+				parts := bytes.Fields(l)
+				if len(parts) >= 2 {
+					if val, err := strconv.ParseUint(string(parts[1]), 10, 64); err == nil {
+						totalEngineNS += val
+					}
+				}
+			} else if bytes.HasPrefix(l, []byte("drm-total-")) {
+				parts := bytes.Fields(l)
+				if len(parts) >= 2 {
+					if val, err := strconv.ParseUint(string(parts[1]), 10, 64); err == nil {
+						mult := uint64(1)
+						if bytes.Contains(l, []byte("KiB")) {
+							mult = 1024
+						} else if bytes.Contains(l, []byte("MiB")) {
+							mult = 1024 * 1024
+						}
+						totalMemBytes += val * mult
+					}
+				}
+			}
+		}
+	}
+
+	if validCount == 0 {
+		return LiveGPUMetrics{}, false
+	}
+
+	var rawUsage float64
+	if !lt.prevDRMTime.IsZero() && totalEngineNS >= lt.prevDRMEngineNS {
+		elapsedNS := now.Sub(lt.prevDRMTime).Nanoseconds()
+		if elapsedNS > 0 {
+			deltaNS := totalEngineNS - lt.prevDRMEngineNS
+			rawUsage = (float64(deltaNS) / float64(elapsedNS)) * 100.0
+			if rawUsage > 100.0 {
+				rawUsage = 100.0
+			}
+		}
+	}
+	lt.prevDRMEngineNS = totalEngineNS
+	lt.prevDRMTime = now
+
+	if lt.smoothedGPUUsage == 0 && rawUsage > 0 {
+		lt.smoothedGPUUsage = rawUsage
+	} else {
+		// Responsive smoothing (30% previous, 70% current)
+		lt.smoothedGPUUsage = lt.smoothedGPUUsage*0.30 + rawUsage*0.70
+	}
+	if lt.smoothedGPUUsage < 0.5 {
+		lt.smoothedGPUUsage = 0
+	}
+
+	res := LiveGPUMetrics{
+		HasGPU:     true,
+		GPUUsage:   lt.smoothedGPUUsage,
+		GPUMemUsed: totalMemBytes / (1024 * 1024),
+	}
+	return res, true
+}
+
 // LiveGPUMetrics holds real-time GPU stats (Exported)
 type LiveGPUMetrics struct {
 	HasGPU      bool
@@ -3381,65 +3529,632 @@ type LiveGPUMetrics struct {
 }
 
 func getAMDOrIntelTemp(cardName string) float64 {
-	hwmonDir := fmt.Sprintf("/sys/class/drm/%s/device/hwmon", cardName)
-	files, err := os.ReadDir(hwmonDir)
-	if err == nil {
+	// 1. Direct hwmon inside the DRM card device directory
+	if cardName != "" {
+		hwmonDir := fmt.Sprintf("/sys/class/drm/%s/device/hwmon", cardName)
+		if files, err := os.ReadDir(hwmonDir); err == nil {
+			for _, f := range files {
+				if strings.HasPrefix(f.Name(), "hwmon") {
+					for _, tFile := range []string{"temp1_input", "temp2_input"} {
+						tempPath := fmt.Sprintf("%s/%s/%s", hwmonDir, f.Name(), tFile)
+						if b, err := os.ReadFile(tempPath); err == nil {
+							if mVal, err := strconv.ParseFloat(strings.TrimSpace(string(b)), 64); err == nil && mVal > 0 {
+								return mVal / 1000.0
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// 2. Global /sys/class/hwmon search for GPU-specific sensors
+	if files, err := os.ReadDir("/sys/class/hwmon"); err == nil {
 		for _, f := range files {
-			if strings.HasPrefix(f.Name(), "hwmon") {
-				tempPath := fmt.Sprintf("%s/%s/temp1_input", hwmonDir, f.Name())
-				if bytes, err := os.ReadFile(tempPath); err == nil {
-					if mVal, err := strconv.ParseFloat(strings.TrimSpace(string(bytes)), 64); err == nil {
+			base := fmt.Sprintf("/sys/class/hwmon/%s", f.Name())
+			nameBytes, err := os.ReadFile(filepath.Join(base, "name"))
+			if err != nil {
+				continue
+			}
+			sensorName := strings.ToLower(strings.TrimSpace(string(nameBytes)))
+			if sensorName == "amdgpu" || sensorName == "radeon" || sensorName == "nouveau" || sensorName == "i915" || sensorName == "xe" {
+				for _, tFile := range []string{"temp1_input", "temp2_input"} {
+					if b, err := os.ReadFile(filepath.Join(base, tFile)); err == nil {
+						if mVal, err := strconv.ParseFloat(strings.TrimSpace(string(b)), 64); err == nil && mVal > 0 {
+							return mVal / 1000.0
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// 3. Fallback for Integrated GPUs (iGPUs) sharing the CPU/SoC thermal package
+	if files, err := os.ReadDir("/sys/class/hwmon"); err == nil {
+		for _, f := range files {
+			base := fmt.Sprintf("/sys/class/hwmon/%s", f.Name())
+			nameBytes, err := os.ReadFile(filepath.Join(base, "name"))
+			if err != nil {
+				continue
+			}
+			sensorName := strings.ToLower(strings.TrimSpace(string(nameBytes)))
+			if sensorName == "coretemp" || sensorName == "k10temp" || sensorName == "zenpower" || sensorName == "cpu_thermal" {
+				if b, err := os.ReadFile(filepath.Join(base, "temp1_input")); err == nil {
+					if mVal, err := strconv.ParseFloat(strings.TrimSpace(string(b)), 64); err == nil && mVal > 0 {
 						return mVal / 1000.0
 					}
 				}
 			}
 		}
 	}
-	return 0
-}
 
-func getAMDOrIntelTempFormatted(cardName string) string {
-	hwmonDir := fmt.Sprintf("/sys/class/drm/%s/device/hwmon", cardName)
-	files, err := os.ReadDir(hwmonDir)
-	if err == nil {
+	// 4. Linux thermal zone fallback
+	if files, err := os.ReadDir("/sys/class/thermal"); err == nil {
 		for _, f := range files {
-			if strings.HasPrefix(f.Name(), "hwmon") {
-				base := fmt.Sprintf("%s/%s", hwmonDir, f.Name())
-				var edge, junc float64
-				if bytes, err := os.ReadFile(fmt.Sprintf("%s/temp1_input", base)); err == nil {
-					if mVal, err := strconv.ParseFloat(strings.TrimSpace(string(bytes)), 64); err == nil {
-						edge = mVal / 1000.0
+			if strings.HasPrefix(f.Name(), "thermal_zone") {
+				tzPath := fmt.Sprintf("/sys/class/thermal/%s", f.Name())
+				typeBytes, _ := os.ReadFile(filepath.Join(tzPath, "type"))
+				tzType := strings.ToLower(strings.TrimSpace(string(typeBytes)))
+				if strings.Contains(tzType, "gpu") || strings.Contains(tzType, "soc") || strings.Contains(tzType, "pkg") {
+					if b, err := os.ReadFile(filepath.Join(tzPath, "temp")); err == nil {
+						if mVal, err := strconv.ParseFloat(strings.TrimSpace(string(b)), 64); err == nil && mVal > 0 {
+							if mVal > 1000 {
+								return mVal / 1000.0
+							}
+							return mVal
+						}
 					}
-				}
-				if bytes, err := os.ReadFile(fmt.Sprintf("%s/temp2_input", base)); err == nil {
-					if mVal, err := strconv.ParseFloat(strings.TrimSpace(string(bytes)), 64); err == nil {
-						junc = mVal / 1000.0
-					}
-				}
-				if edge > 0 {
-					if junc > 0 {
-						return fmt.Sprintf("%.1f °C (Junction: %.1f °C)", edge, junc)
-					}
-					return fmt.Sprintf("%.1f °C", edge)
 				}
 			}
 		}
 	}
+
+	return 0
+}
+
+func getAMDOrIntelTempFormatted(cardName string) string {
+	if cardName != "" {
+		hwmonDir := fmt.Sprintf("/sys/class/drm/%s/device/hwmon", cardName)
+		if files, err := os.ReadDir(hwmonDir); err == nil {
+			for _, f := range files {
+				if strings.HasPrefix(f.Name(), "hwmon") {
+					base := fmt.Sprintf("%s/%s", hwmonDir, f.Name())
+					var edge, junc float64
+					if bytes, err := os.ReadFile(fmt.Sprintf("%s/temp1_input", base)); err == nil {
+						if mVal, err := strconv.ParseFloat(strings.TrimSpace(string(bytes)), 64); err == nil {
+							edge = mVal / 1000.0
+						}
+					}
+					if bytes, err := os.ReadFile(fmt.Sprintf("%s/temp2_input", base)); err == nil {
+						if mVal, err := strconv.ParseFloat(strings.TrimSpace(string(bytes)), 64); err == nil {
+							junc = mVal / 1000.0
+						}
+					}
+					if edge > 0 {
+						if junc > 0 {
+							return fmt.Sprintf("%.1f °C (Junction: %.1f °C)", edge, junc)
+						}
+						return fmt.Sprintf("%.1f °C", edge)
+					}
+				}
+			}
+		}
+	}
+
+	temp := getAMDOrIntelTemp(cardName)
+	if temp > 0 {
+		return fmt.Sprintf("%.1f °C", temp)
+	}
 	return ""
+}
+
+func readSysfsFloat(path string) (float64, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
+	}
+	return strconv.ParseFloat(strings.TrimSpace(string(b)), 64)
+}
+
+func readSysfsUint64(path string) (uint64, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
+	}
+	return strconv.ParseUint(strings.TrimSpace(string(b)), 10, 64)
+}
+
+func getIntelGPUUsageAndMemory(cardName string) (float64, uint64, uint64, float64, bool) {
+	type freqTriplet struct {
+		actPath string
+		minPath string
+		maxPath string
+	}
+	triplets := []freqTriplet{
+		{
+			actPath: fmt.Sprintf("/sys/class/drm/%s/gt/gt0/rps_act_freq_mhz", cardName),
+			minPath: fmt.Sprintf("/sys/class/drm/%s/gt/gt0/rps_min_freq_mhz", cardName),
+			maxPath: fmt.Sprintf("/sys/class/drm/%s/gt/gt0/rps_max_freq_mhz", cardName),
+		},
+		{
+			actPath: fmt.Sprintf("/sys/class/drm/%s/gt_act_freq_mhz", cardName),
+			minPath: fmt.Sprintf("/sys/class/drm/%s/gt_min_freq_mhz", cardName),
+			maxPath: fmt.Sprintf("/sys/class/drm/%s/gt_max_freq_mhz", cardName),
+		},
+		{
+			actPath: fmt.Sprintf("/sys/class/drm/%s/gt_cur_freq_mhz", cardName),
+			minPath: fmt.Sprintf("/sys/class/drm/%s/gt_min_freq_mhz", cardName),
+			maxPath: fmt.Sprintf("/sys/class/drm/%s/gt_max_freq_mhz", cardName),
+		},
+		{
+			actPath: fmt.Sprintf("/sys/class/drm/%s/device/tile0/gt0/freq0/act_freq", cardName),
+			minPath: fmt.Sprintf("/sys/class/drm/%s/device/tile0/gt0/freq0/min_freq", cardName),
+			maxPath: fmt.Sprintf("/sys/class/drm/%s/device/tile0/gt0/freq0/max_freq", cardName),
+		},
+		{
+			actPath: fmt.Sprintf("/sys/class/drm/%s/device/tile0/gt0/freq0/cur_freq", cardName),
+			minPath: fmt.Sprintf("/sys/class/drm/%s/device/tile0/gt0/freq0/min_freq", cardName),
+			maxPath: fmt.Sprintf("/sys/class/drm/%s/device/tile0/gt0/freq0/max_freq", cardName),
+		},
+	}
+
+	var actFreq, minFreq, maxFreq float64
+	foundFreq := false
+	for _, tr := range triplets {
+		if act, err := readSysfsFloat(tr.actPath); err == nil && act > 0 {
+			if max, errMax := readSysfsFloat(tr.maxPath); errMax == nil && max > 0 {
+				actFreq = act
+				maxFreq = max
+				if min, errMin := readSysfsFloat(tr.minPath); errMin == nil && min > 0 {
+					minFreq = min
+				} else {
+					rpnPath := fmt.Sprintf("/sys/class/drm/%s/gt_RPn_freq_mhz", cardName)
+					if rpn, errR := readSysfsFloat(rpnPath); errR == nil && rpn > 0 {
+						minFreq = rpn
+					} else {
+						minFreq = 100.0
+					}
+				}
+				foundFreq = true
+				break
+			}
+		}
+	}
+
+	if !foundFreq {
+		return 0, 0, 0, 0, false
+	}
+
+	var usage float64
+	if actFreq <= minFreq {
+		usage = 0.0
+	} else if maxFreq > minFreq {
+		usage = ((actFreq - minFreq) / (maxFreq - minFreq)) * 100.0
+		if usage > 100.0 {
+			usage = 100.0
+		}
+	}
+
+	var memUsed, memTotal uint64
+	var memUsage float64
+	lmemUsedPaths := []string{
+		fmt.Sprintf("/sys/class/drm/%s/device/lmem_used_bytes", cardName),
+		fmt.Sprintf("/sys/class/drm/%s/device/tile0/memory0/used_bytes", cardName),
+	}
+	lmemTotalPaths := []string{
+		fmt.Sprintf("/sys/class/drm/%s/device/lmem_total_bytes", cardName),
+		fmt.Sprintf("/sys/class/drm/%s/device/tile0/memory0/total_bytes", cardName),
+	}
+	for i := range lmemUsedPaths {
+		u, errU := readSysfsUint64(lmemUsedPaths[i])
+		t, errT := readSysfsUint64(lmemTotalPaths[i])
+		if errU == nil && errT == nil && t > 0 {
+			memUsed = u / (1024 * 1024)
+			memTotal = t / (1024 * 1024)
+			memUsage = (float64(u) / float64(t)) * 100.0
+			break
+		}
+	}
+
+	return usage, memUsed, memTotal, memUsage, true
+}
+
+func getAMDGPUUsageAndMemory(cardName string) (float64, uint64, uint64, float64, bool) {
+	var usage float64
+	foundUsage := false
+
+	busyPaths := []string{
+		fmt.Sprintf("/sys/class/drm/%s/device/gpu_busy_percent", cardName),
+		fmt.Sprintf("/sys/class/drm/%s/device/load", cardName),
+	}
+	for _, bp := range busyPaths {
+		if val, err := readSysfsFloat(bp); err == nil {
+			usage = val
+			if usage > 100.0 {
+				usage = 100.0
+			}
+			foundUsage = true
+			break
+		}
+	}
+
+	if !foundUsage {
+		hwmonDir := fmt.Sprintf("/sys/class/drm/%s/device/hwmon", cardName)
+		if files, err := os.ReadDir(hwmonDir); err == nil {
+			for _, f := range files {
+				if strings.HasPrefix(f.Name(), "hwmon") {
+					for _, bp := range []string{
+						fmt.Sprintf("%s/%s/gpu_busy_percent", hwmonDir, f.Name()),
+						fmt.Sprintf("%s/%s/device/gpu_busy_percent", hwmonDir, f.Name()),
+					} {
+						if val, err := readSysfsFloat(bp); err == nil {
+							usage = val
+							if usage > 100.0 {
+								usage = 100.0
+							}
+							foundUsage = true
+							break
+						}
+					}
+					if foundUsage {
+						break
+					}
+				}
+			}
+		}
+	}
+
+	if !foundUsage {
+		sclkPath := fmt.Sprintf("/sys/class/drm/%s/device/pp_dpm_sclk", cardName)
+		if b, err := os.ReadFile(sclkPath); err == nil {
+			lines := strings.Split(string(b), "\n")
+			var minMhz, maxMhz, curMhz float64
+			for _, line := range lines {
+				line = strings.TrimSpace(line)
+				if line == "" {
+					continue
+				}
+				parts := strings.Fields(line)
+				if len(parts) >= 2 {
+					mhzStr := strings.TrimSuffix(strings.TrimSuffix(parts[1], "Mhz"), "MHz")
+					if mhz, err := strconv.ParseFloat(mhzStr, 64); err == nil {
+						if minMhz == 0 || mhz < minMhz {
+							minMhz = mhz
+						}
+						if mhz > maxMhz {
+							maxMhz = mhz
+						}
+						if strings.Contains(line, "*") {
+							curMhz = mhz
+						}
+					}
+				}
+			}
+			if curMhz > 0 && maxMhz > minMhz {
+				if curMhz <= minMhz {
+					usage = 0.0
+				} else {
+					usage = ((curMhz - minMhz) / (maxMhz - minMhz)) * 100.0
+				}
+				if usage > 100.0 {
+					usage = 100.0
+				}
+				foundUsage = true
+			}
+		}
+	}
+
+	var memUsed, memTotal uint64
+	var memUsage float64
+
+	vramUsedPath := fmt.Sprintf("/sys/class/drm/%s/device/mem_info_vram_used", cardName)
+	vramTotalPath := fmt.Sprintf("/sys/class/drm/%s/device/mem_info_vram_total", cardName)
+	uVal, errU := readSysfsUint64(vramUsedPath)
+	tVal, errT := readSysfsUint64(vramTotalPath)
+	if errU == nil && errT == nil && tVal > 0 {
+		memUsed = uVal / (1024 * 1024)
+		memTotal = tVal / (1024 * 1024)
+		memUsage = (float64(uVal) / float64(tVal)) * 100.0
+	} else {
+		gttUsedPath := fmt.Sprintf("/sys/class/drm/%s/device/mem_info_gtt_used", cardName)
+		gttTotalPath := fmt.Sprintf("/sys/class/drm/%s/device/mem_info_gtt_total", cardName)
+		guVal, gerrU := readSysfsUint64(gttUsedPath)
+		gtVal, gerrT := readSysfsUint64(gttTotalPath)
+		if gerrU == nil && gerrT == nil && gtVal > 0 {
+			memUsed = guVal / (1024 * 1024)
+			memTotal = gtVal / (1024 * 1024)
+			memUsage = (float64(guVal) / float64(gtVal)) * 100.0
+		}
+	}
+
+	return usage, memUsed, memTotal, memUsage, foundUsage || memTotal > 0
+}
+
+func getNvidiaDRMUsageAndMemory(cardName string) (float64, uint64, uint64, float64, bool) {
+	var usage float64
+	found := false
+
+	busyPath := fmt.Sprintf("/sys/class/drm/%s/device/gpu_busy_percent", cardName)
+	if val, err := readSysfsFloat(busyPath); err == nil {
+		usage = val
+		found = true
+	}
+
+	var memUsed, memTotal uint64
+	var memUsage float64
+	vramUsedPath := fmt.Sprintf("/sys/class/drm/%s/device/mem_info_vram_used", cardName)
+	vramTotalPath := fmt.Sprintf("/sys/class/drm/%s/device/mem_info_vram_total", cardName)
+	if uVal, errU := readSysfsUint64(vramUsedPath); errU == nil {
+		if tVal, errT := readSysfsUint64(vramTotalPath); errT == nil && tVal > 0 {
+			memUsed = uVal / (1024 * 1024)
+			memTotal = tVal / (1024 * 1024)
+			memUsage = (float64(uVal) / float64(tVal)) * 100.0
+			found = true
+		}
+	}
+
+	return usage, memUsed, memTotal, memUsage, found
+}
+
+func getLinuxDevfreqOrArmGPUMetrics() (LiveGPUMetrics, error) {
+	metrics := LiveGPUMetrics{}
+
+	// 1. Qualcomm Adreno (KGSL)
+	kgslBusyPath := "/sys/class/kgsl/kgsl-3d0/gpubusy"
+	if b, err := os.ReadFile(kgslBusyPath); err == nil {
+		fields := strings.Fields(string(b))
+		if len(fields) >= 2 {
+			busy, err1 := strconv.ParseFloat(fields[0], 64)
+			total, err2 := strconv.ParseFloat(fields[1], 64)
+			if err1 == nil && err2 == nil && total > 0 {
+				metrics.HasGPU = true
+				metrics.GPUUsage = (busy / total) * 100.0
+				if metrics.GPUUsage > 100.0 {
+					metrics.GPUUsage = 100.0
+				}
+				metrics.GPUTemp = getAMDOrIntelTemp("")
+				return metrics, nil
+			}
+		}
+	}
+
+	// 2. Generic Linux Devfreq subsystem (/sys/class/devfreq/*gpu*, *mali*, *panfrost*, etc.)
+	if entries, err := os.ReadDir("/sys/class/devfreq"); err == nil {
+		for _, e := range entries {
+			name := strings.ToLower(e.Name())
+			if strings.Contains(name, "gpu") || strings.Contains(name, "mali") ||
+				strings.Contains(name, "panfrost") || strings.Contains(name, "v3d") ||
+				strings.Contains(name, "kgsl") || strings.Contains(name, "lima") {
+				base := fmt.Sprintf("/sys/class/devfreq/%s", e.Name())
+
+				if loadBytes, err := os.ReadFile(fmt.Sprintf("%s/load", base)); err == nil {
+					loadStr := strings.TrimSpace(string(loadBytes))
+					if strings.Contains(loadStr, "@") {
+						parts := strings.Split(loadStr, "@")
+						if val, err := strconv.ParseFloat(parts[0], 64); err == nil {
+							metrics.HasGPU = true
+							metrics.GPUUsage = val
+							metrics.GPUTemp = getAMDOrIntelTemp("")
+							return metrics, nil
+						}
+					} else {
+						fields := strings.Fields(loadStr)
+						if len(fields) >= 2 {
+							busy, err1 := strconv.ParseFloat(fields[0], 64)
+							total, err2 := strconv.ParseFloat(fields[1], 64)
+							if err1 == nil && err2 == nil && total > 0 {
+								metrics.HasGPU = true
+								metrics.GPUUsage = (busy / total) * 100.0
+								metrics.GPUTemp = getAMDOrIntelTemp("")
+								return metrics, nil
+							}
+						}
+					}
+				}
+
+				cur, err1 := readSysfsFloat(fmt.Sprintf("%s/cur_freq", base))
+				min, err2 := readSysfsFloat(fmt.Sprintf("%s/min_freq", base))
+				max, err3 := readSysfsFloat(fmt.Sprintf("%s/max_freq", base))
+				if err1 == nil && err2 == nil && err3 == nil && max > min {
+					metrics.HasGPU = true
+					if cur <= min {
+						metrics.GPUUsage = 0.0
+					} else {
+						metrics.GPUUsage = ((cur - min) / (max - min)) * 100.0
+					}
+					metrics.GPUTemp = getAMDOrIntelTemp("")
+					return metrics, nil
+				}
+			}
+		}
+	}
+
+	// 3. ARM Mali legacy driver (/sys/class/misc/mali0/device/utilization)
+	maliUtilPath := "/sys/class/misc/mali0/device/utilization"
+	if b, err := os.ReadFile(maliUtilPath); err == nil {
+		if val, err := strconv.ParseFloat(strings.TrimSpace(string(b)), 64); err == nil {
+			metrics.HasGPU = true
+			if val <= 100.0 {
+				metrics.GPUUsage = val
+			} else {
+				metrics.GPUUsage = (val / 255.0) * 100.0
+			}
+			metrics.GPUTemp = getAMDOrIntelTemp("")
+			return metrics, nil
+		}
+	}
+
+	// 4. Raspberry Pi vcgencmd
+	if _, err := exec.LookPath("vcgencmd"); err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "vcgencmd", "measure_clock", "core")
+		if out, err := cmd.Output(); err == nil {
+			parts := strings.Split(strings.TrimSpace(string(out)), "=")
+			if len(parts) >= 2 {
+				if hz, err := strconv.ParseFloat(parts[1], 64); err == nil && hz > 0 {
+					metrics.HasGPU = true
+					minHz := 250000000.0
+					maxHz := 500000000.0
+					if hz <= minHz {
+						metrics.GPUUsage = 0.0
+					} else if hz >= maxHz {
+						metrics.GPUUsage = 100.0
+					} else {
+						metrics.GPUUsage = ((hz - minHz) / (maxHz - minHz)) * 100.0
+					}
+
+					cmdTemp := exec.CommandContext(ctx, "vcgencmd", "measure_temp")
+					if tOut, err := cmdTemp.Output(); err == nil {
+						tParts := strings.Split(strings.TrimSpace(string(tOut)), "=")
+						if len(tParts) >= 2 {
+							raw := strings.TrimSuffix(strings.TrimSuffix(tParts[1], "'C"), "C")
+							if tVal, err := strconv.ParseFloat(raw, 64); err == nil {
+								metrics.GPUTemp = tVal
+							}
+						}
+					}
+					return metrics, nil
+				}
+			}
+		}
+	}
+
+	return metrics, fmt.Errorf("no ARM/devfreq GPU telemetry found")
+}
+
+func getMacOSGPUMetrics() (LiveGPUMetrics, error) {
+	metrics := LiveGPUMetrics{}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "ioreg", "-r", "-c", "IOAccelerator", "-d", "2")
+	out, err := cmd.Output()
+	if err != nil {
+		return metrics, err
+	}
+
+	lines := strings.Split(string(out), "\n")
+	foundUtil := false
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.Contains(line, `"Device Utilization %"`) || strings.Contains(line, `"GPU Activity(%)"`) {
+			parts := strings.Split(line, "=")
+			if len(parts) >= 2 {
+				cleanVal := strings.Trim(strings.TrimSpace(parts[1]), ",;")
+				if val, err := strconv.ParseFloat(cleanVal, 64); err == nil {
+					metrics.HasGPU = true
+					metrics.GPUUsage = val
+					if metrics.GPUUsage > 100.0 {
+						metrics.GPUUsage = 100.0
+					}
+					foundUtil = true
+				}
+			}
+		}
+
+		if strings.Contains(line, `"In use system memory"`) || strings.Contains(line, `"Allocated memory"`) {
+			parts := strings.Split(line, "=")
+			if len(parts) >= 2 {
+				cleanVal := strings.Trim(strings.TrimSpace(parts[1]), ",;")
+				if bytesVal, err := strconv.ParseUint(cleanVal, 10, 64); err == nil && bytesVal > 0 {
+					metrics.GPUMemUsed = bytesVal / (1024 * 1024)
+				}
+			}
+		}
+	}
+
+	if foundUtil || metrics.HasGPU {
+		return metrics, nil
+	}
+
+	return metrics, fmt.Errorf("no macOS GPU telemetry parsed")
+}
+
+func getWindowsGPUMetrics() (LiveGPUMetrics, error) {
+	metrics := LiveGPUMetrics{}
+
+	// 1. Try Windows typeperf for GPU 3D engine counters
+	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "typeperf", `\GPU Engine(*engtype_3D)\Utilization Percentage`, "-sc", "1")
+	out, err := cmd.Output()
+	if err == nil {
+		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+		if len(lines) >= 2 {
+			dataLine := lines[len(lines)-1]
+			records := strings.Split(dataLine, ",")
+			var totalUtil float64
+			validCount := 0
+			for i := 1; i < len(records); i++ {
+				raw := strings.Trim(strings.TrimSpace(records[i]), `"`)
+				if val, err := strconv.ParseFloat(raw, 64); err == nil {
+					totalUtil += val
+					validCount++
+				}
+			}
+			if validCount > 0 {
+				metrics.HasGPU = true
+				if totalUtil > 100.0 {
+					totalUtil = 100.0
+				}
+				metrics.GPUUsage = totalUtil
+				return metrics, nil
+			}
+		}
+	}
+
+	// 2. PowerShell WMI fallback
+	ctxPS, cancelPS := context.WithTimeout(context.Background(), 700*time.Millisecond)
+	defer cancelPS()
+
+	psCmd := exec.CommandContext(ctxPS, "powershell", "-NoProfile", "-NonInteractive", "-Command",
+		`$u = (Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine | Where-Object {$_.Name -like '*engtype_3D'} | Measure-Object -Property UtilizationPercentage -Sum).Sum; if ($u -ne $null) { [math]::Round($u, 1) }`)
+	psOut, psErr := psCmd.Output()
+	if psErr == nil {
+		valStr := strings.TrimSpace(string(psOut))
+		if val, err := strconv.ParseFloat(valStr, 64); err == nil {
+			metrics.HasGPU = true
+			if val > 100.0 {
+				val = 100.0
+			}
+			metrics.GPUUsage = val
+			return metrics, nil
+		}
+	}
+
+	return metrics, fmt.Errorf("no Windows GPU telemetry found")
 }
 
 func getGPUMetrics() (LiveGPUMetrics, error) {
 	metrics := LiveGPUMetrics{}
 
-	// 1. Try Nvidia-smi first (Proprietary Nvidia driver)
+	// 1. Try Nvidia first (nvidia-smi works on Linux & Windows)
 	if nvidia, err := getNvidiaGPUMetrics(); err == nil && nvidia.HasGPU {
 		return nvidia, nil
 	}
 
+	// 2. macOS Platform (Apple Silicon M1/M2/M3/M4 & Intel Macs)
+	if runtime.GOOS == "darwin" {
+		if macMetrics, err := getMacOSGPUMetrics(); err == nil && macMetrics.HasGPU {
+			return macMetrics, nil
+		}
+	}
+
+	// 3. Windows Platform (Intel, AMD, Qualcomm, etc. via DirectX/WMI performance counters)
+	if runtime.GOOS == "windows" {
+		if winMetrics, err := getWindowsGPUMetrics(); err == nil && winMetrics.HasGPU {
+			return winMetrics, nil
+		}
+	}
+
+	// 4. Linux Platform (DRM cards: Intel, AMD, Nvidia Nouveau, etc.)
 	if runtime.GOOS == "linux" {
-		// Scan all active DRM cards
 		files, err := os.ReadDir("/sys/class/drm")
 		if err == nil {
+			var candidates []LiveGPUMetrics
 			for _, file := range files {
 				cardName := file.Name()
 				if !strings.HasPrefix(cardName, "card") || strings.Contains(cardName, "-") {
@@ -3451,99 +4166,95 @@ func getGPUMetrics() (LiveGPUMetrics, error) {
 					continue
 				}
 
-				// Read Vendor ID
-				vendorBytes, err := os.ReadFile(fmt.Sprintf("/sys/class/drm/%s/device/vendor", cardName))
-				if err != nil {
-					continue
-				}
+				vendorBytes, _ := os.ReadFile(fmt.Sprintf("/sys/class/drm/%s/device/vendor", cardName))
 				vendorID := strings.TrimSpace(strings.ToLower(string(vendorBytes)))
 
-				// 2. AMD GPU (Vendor ID: 0x1002)
-				if strings.Contains(vendorID, "1002") {
-					metrics.HasGPU = true
+				driverLink, _ := os.Readlink(fmt.Sprintf("/sys/class/drm/%s/device/driver", cardName))
+				driverName := strings.ToLower(filepath.Base(driverLink))
 
-					// Try reading GPU busy/usage
-					busyPath := fmt.Sprintf("/sys/class/drm/%s/device/gpu_busy_percent", cardName)
-					if busyBytes, err := os.ReadFile(busyPath); err == nil {
-						if busyVal, err := strconv.ParseFloat(strings.TrimSpace(string(busyBytes)), 64); err == nil {
-							metrics.GPUUsage = busyVal
+				// A. AMD GPU (Vendor ID: 0x1002, or driver amdgpu/radeon)
+				if strings.Contains(vendorID, "1002") || driverName == "amdgpu" || driverName == "radeon" {
+					usage, memUsed, memTotal, memUsage, ok := getAMDGPUUsageAndMemory(cardName)
+					if ok {
+						c := LiveGPUMetrics{
+							HasGPU:      true,
+							GPUUsage:    usage,
+							GPUMemUsed:  memUsed,
+							GPUMemTotal: memTotal,
+							GPUMemUsage: memUsage,
+							GPUTemp:     getAMDOrIntelTemp(cardName),
 						}
-					}
-
-					// Try reading VRAM stats
-					vramUsedPath := fmt.Sprintf("/sys/class/drm/%s/device/mem_info_vram_used", cardName)
-					vramTotalPath := fmt.Sprintf("/sys/class/drm/%s/device/mem_info_vram_total", cardName)
-					if uBytes, errU := os.ReadFile(vramUsedPath); errU == nil {
-						if tBytes, errT := os.ReadFile(vramTotalPath); errT == nil {
-							uVal, err1 := strconv.ParseUint(strings.TrimSpace(string(uBytes)), 10, 64)
-							tVal, err2 := strconv.ParseUint(strings.TrimSpace(string(tBytes)), 10, 64)
-							if err1 == nil && err2 == nil && tVal > 0 {
-								metrics.GPUMemUsed = uVal / (1024 * 1024)
-								metrics.GPUMemTotal = tVal / (1024 * 1024)
-								metrics.GPUMemUsage = (float64(uVal) / float64(tVal)) * 100.0
-							}
-						}
-					}
-
-					// Try reading temperature from hwmon
-					metrics.GPUTemp = getAMDOrIntelTemp(cardName)
-					return metrics, nil
-				}
-
-				// 3. Intel GPU (Vendor ID: 0x8086)
-				if strings.Contains(vendorID, "8086") {
-					actFreqPath := fmt.Sprintf("/sys/class/drm/%s/gt_act_freq_mhz", cardName)
-					maxFreqPath := fmt.Sprintf("/sys/class/drm/%s/gt_max_freq_mhz", cardName)
-					if _, err := os.Stat(actFreqPath); err == nil {
-						actBytes, err1 := os.ReadFile(actFreqPath)
-						maxBytes, err2 := os.ReadFile(maxFreqPath)
-						if err1 == nil && err2 == nil {
-							actVal, errAct := strconv.ParseFloat(strings.TrimSpace(string(actBytes)), 64)
-							maxVal, errMax := strconv.ParseFloat(strings.TrimSpace(string(maxBytes)), 64)
-							if errAct == nil && errMax == nil && maxVal > 0 {
-								metrics.HasGPU = true
-								metrics.GPUUsage = (actVal / maxVal) * 100.0
-								metrics.GPUMemUsage = 0
-								metrics.GPUMemUsed = uint64(actVal)
-								metrics.GPUMemTotal = uint64(maxVal)
-								metrics.GPUTemp = getAMDOrIntelTemp(cardName)
-								return metrics, nil
-							}
-						}
+						candidates = append(candidates, c)
+						continue
 					}
 				}
 
-				// 4. Nvidia GPU (Vendor ID: 0x10de) (Nouveau/open-source fallback when nvidia-smi is missing)
-				if strings.Contains(vendorID, "10de") {
-					metrics.HasGPU = true
-
-					// Try reading GPU busy/usage
-					busyPath := fmt.Sprintf("/sys/class/drm/%s/device/gpu_busy_percent", cardName)
-					if busyBytes, err := os.ReadFile(busyPath); err == nil {
-						if busyVal, err := strconv.ParseFloat(strings.TrimSpace(string(busyBytes)), 64); err == nil {
-							metrics.GPUUsage = busyVal
+				// B. Intel GPU (Vendor ID: 0x8086, or driver i915/xe)
+				if strings.Contains(vendorID, "8086") || driverName == "i915" || driverName == "xe" {
+					usage, memUsed, memTotal, memUsage, ok := getIntelGPUUsageAndMemory(cardName)
+					if ok {
+						c := LiveGPUMetrics{
+							HasGPU:      true,
+							GPUUsage:    usage,
+							GPUMemUsed:  memUsed,
+							GPUMemTotal: memTotal,
+							GPUMemUsage: memUsage,
+							GPUTemp:     getAMDOrIntelTemp(cardName),
 						}
+						candidates = append(candidates, c)
+						continue
 					}
+				}
 
-					// Try reading VRAM stats
-					vramUsedPath := fmt.Sprintf("/sys/class/drm/%s/device/mem_info_vram_used", cardName)
-					vramTotalPath := fmt.Sprintf("/sys/class/drm/%s/device/mem_info_vram_total", cardName)
-					if uBytes, errU := os.ReadFile(vramUsedPath); errU == nil {
-						if tBytes, errT := os.ReadFile(vramTotalPath); errT == nil {
-							uVal, err1 := strconv.ParseUint(strings.TrimSpace(string(uBytes)), 10, 64)
-							tVal, err2 := strconv.ParseUint(strings.TrimSpace(string(tBytes)), 10, 64)
-							if err1 == nil && err2 == nil && tVal > 0 {
-								metrics.GPUMemUsed = uVal / (1024 * 1024)
-								metrics.GPUMemTotal = tVal / (1024 * 1024)
-								metrics.GPUMemUsage = (float64(uVal) / float64(tVal)) * 100.0
-							}
+				// C. Nvidia GPU via Nouveau / open-source (Vendor ID: 0x10de, or driver nouveau)
+				if strings.Contains(vendorID, "10de") || driverName == "nouveau" {
+					usage, memUsed, memTotal, memUsage, ok := getNvidiaDRMUsageAndMemory(cardName)
+					if ok {
+						c := LiveGPUMetrics{
+							HasGPU:      true,
+							GPUUsage:    usage,
+							GPUMemUsed:  memUsed,
+							GPUMemTotal: memTotal,
+							GPUMemUsage: memUsage,
+							GPUTemp:     getAMDOrIntelTemp(cardName),
 						}
+						candidates = append(candidates, c)
+						continue
 					}
+				}
 
-					metrics.GPUTemp = getAMDOrIntelTemp(cardName)
-					return metrics, nil
+				// D. Any other DRM GPU (e.g. Broadcom v3d/vc4, ARM Panfrost, Lima, etc.)
+				busyPath := fmt.Sprintf("/sys/class/drm/%s/device/gpu_busy_percent", cardName)
+				if val, err := readSysfsFloat(busyPath); err == nil {
+					c := LiveGPUMetrics{
+						HasGPU:   true,
+						GPUUsage: val,
+						GPUTemp:  getAMDOrIntelTemp(cardName),
+					}
+					if c.GPUUsage > 100.0 {
+						c.GPUUsage = 100.0
+					}
+					candidates = append(candidates, c)
+					continue
 				}
 			}
+
+			// If multiple GPUs found (e.g. discrete AMD/Intel Arc + integrated GPU),
+			// pick discrete (GPUMemTotal > 0) or active (GPUUsage > 0), else first candidate.
+			if len(candidates) > 0 {
+				best := candidates[0]
+				for _, c := range candidates[1:] {
+					if (c.GPUMemTotal > 0 && best.GPUMemTotal == 0) || (c.GPUUsage > best.GPUUsage) {
+						best = c
+					}
+				}
+				return best, nil
+			}
+		}
+
+		// 5. Linux ARM / Devfreq / SoC GPU fallback (RPi, Adreno, Mali, Rockchip)
+		if armMetrics, err := getLinuxDevfreqOrArmGPUMetrics(); err == nil && armMetrics.HasGPU {
+			return armMetrics, nil
 		}
 	}
 
@@ -3552,36 +4263,85 @@ func getGPUMetrics() (LiveGPUMetrics, error) {
 
 func getNvidiaGPUMetrics() (LiveGPUMetrics, error) {
 	metrics := LiveGPUMetrics{}
-	path, err := exec.LookPath("nvidia-smi")
-	if err != nil {
-		return metrics, err
+
+	nvsmiPath := "nvidia-smi"
+	if runtime.GOOS == "windows" {
+		if _, err := exec.LookPath("nvidia-smi"); err != nil {
+			winPaths := []string{
+				`C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe`,
+				`C:\Windows\System32\nvidia-smi.exe`,
+			}
+			found := false
+			for _, wp := range winPaths {
+				if _, err := os.Stat(wp); err == nil {
+					nvsmiPath = wp
+					found = true
+					break
+				}
+			}
+			if !found {
+				return metrics, fmt.Errorf("nvidia-smi not found")
+			}
+		}
+	} else {
+		if _, err := exec.LookPath("nvidia-smi"); err != nil {
+			return metrics, err
+		}
 	}
 
-	cmd := exec.Command(path, "--query-gpu=utilization.gpu,utilization.memory,temperature.gpu,memory.used,memory.total", "--format=csv,noheader,nounits")
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, nvsmiPath, "--query-gpu=utilization.gpu,utilization.memory,temperature.gpu,memory.used,memory.total", "--format=csv,noheader,nounits")
 	out, err := cmd.Output()
 	if err != nil {
 		return metrics, err
 	}
 
-	line := strings.TrimSpace(string(out))
-	parts := strings.Split(line, ",")
-	if len(parts) < 5 {
-		return metrics, fmt.Errorf("invalid output format from nvidia-smi")
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	for _, rawLine := range lines {
+		line := strings.TrimSpace(rawLine)
+		if line == "" {
+			continue
+		}
+		parts := strings.Split(line, ",")
+		if len(parts) < 5 {
+			continue
+		}
+
+		c0 := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(parts[0]), "%"))
+		c1 := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(parts[1]), "%"))
+		c2 := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(parts[2]), "%"))
+		c3 := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(parts[3]), "%"))
+		c4 := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(parts[4]), "%"))
+
+		gpuUtil, err1 := strconv.ParseFloat(c0, 64)
+		memUtil, err2 := strconv.ParseFloat(c1, 64)
+		temp, err3 := strconv.ParseFloat(c2, 64)
+		memUsed, err4 := strconv.ParseUint(c3, 10, 64)
+		memTotal, err5 := strconv.ParseUint(c4, 10, 64)
+
+		if err1 == nil {
+			metrics.HasGPU = true
+			if gpuUtil > metrics.GPUUsage || !metrics.HasGPU {
+				metrics.GPUUsage = gpuUtil
+			}
+			if err2 == nil {
+				metrics.GPUMemUsage = memUtil
+			}
+			if err3 == nil && temp > 0 {
+				metrics.GPUTemp = temp
+			}
+			if err4 == nil {
+				metrics.GPUMemUsed = memUsed
+			}
+			if err5 == nil {
+				metrics.GPUMemTotal = memTotal
+			}
+		}
 	}
 
-	gpuUtil, err1 := strconv.ParseFloat(strings.TrimSpace(parts[0]), 64)
-	memUtil, err2 := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
-	temp, err3 := strconv.ParseFloat(strings.TrimSpace(parts[2]), 64)
-	memUsed, err4 := strconv.ParseUint(strings.TrimSpace(parts[3]), 10, 64)
-	memTotal, err5 := strconv.ParseUint(strings.TrimSpace(parts[4]), 10, 64)
-
-	if err1 == nil && err2 == nil && err3 == nil && err4 == nil && err5 == nil {
-		metrics.HasGPU = true
-		metrics.GPUUsage = gpuUtil
-		metrics.GPUMemUsage = memUtil
-		metrics.GPUMemUsed = memUsed
-		metrics.GPUMemTotal = memTotal
-		metrics.GPUTemp = temp
+	if metrics.HasGPU {
 		return metrics, nil
 	}
 

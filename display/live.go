@@ -1,6 +1,7 @@
 package display
 
 import (
+	"bytes"
 	"fmt"
 	"net"
 	"os"
@@ -182,7 +183,6 @@ func (ld *LiveDisplay) updateSize() {
 }
 
 func (ld *LiveDisplay) renderWarningScreen(theme Theme) {
-	fmt.Print("\033[H\033[2J")
 	boxWidth := 46
 	if ld.termWidth < boxWidth {
 		boxWidth = ld.termWidth - 2
@@ -206,17 +206,33 @@ func (ld *LiveDisplay) renderWarningScreen(theme Theme) {
 
 	box := drawBox("Warning", lines, boxWidth, len(lines)+2, theme)
 	padY := (ld.termHeight - len(box)) / 2
+	var allRows []string
 	for i := 0; i < padY; i++ {
-		fmt.Print("\033[K\r\n")
+		allRows = append(allRows, "")
 	}
 	for _, l := range box {
 		padX := (ld.termWidth - boxWidth) / 2
 		if padX < 0 {
 			padX = 0
 		}
-		fmt.Printf("%s%s\033[K\r\n", strings.Repeat(" ", padX), l)
+		allRows = append(allRows, strings.Repeat(" ", padX)+l)
 	}
-	fmt.Print("\033[J")
+
+	if len(allRows) > ld.termHeight {
+		allRows = allRows[:ld.termHeight]
+	}
+
+	var buf bytes.Buffer
+	buf.WriteString("\033[?2026h\033[H")
+	for i, row := range allRows {
+		if i > 0 {
+			buf.WriteString("\r\n")
+		}
+		buf.WriteString(row)
+		buf.WriteString("\033[K")
+	}
+	buf.WriteString("\033[J\033[?2026l")
+	os.Stdout.Write(buf.Bytes())
 }
 
 func (ld *LiveDisplay) render() {
@@ -233,7 +249,7 @@ func (ld *LiveDisplay) render() {
 		return
 	}
 
-	// Update peak network rates
+	// Update peak network and disk rates
 	if metrics.NetRxSpeed > ld.peakRx {
 		ld.peakRx = metrics.NetRxSpeed
 	}
@@ -247,42 +263,63 @@ func (ld *LiveDisplay) render() {
 		ld.peakDiskWrite = metrics.DiskWriteSpeed
 	}
 
-	// Move cursor to home (top-left) to redraw cleanly
-	fmt.Print("\033[H")
+	headerRows := ld.getHeaderRows(theme)
+	withFooterBlank := ld.termHeight >= 26
+	footerRows := ld.getFooterRows(theme, withFooterBlank)
 
-	headerLines := ld.printHeader(theme)
-	footerLines := 1
-	if ld.termHeight >= 26 {
-		footerLines = 2
-	}
-	availableHeight := ld.termHeight - headerLines - footerLines
-	if availableHeight < 10 {
-		availableHeight = 10
+	availableHeight := ld.termHeight - len(headerRows) - len(footerRows)
+	if availableHeight < 8 {
+		availableHeight = 8
 	}
 
+	var contentRows []string
 	switch ld.tab {
 	case "processes":
-		ld.renderProcesses(metrics, theme, availableHeight)
+		contentRows = ld.renderProcesses(metrics, theme, availableHeight)
 	case "network":
-		ld.renderNetwork(metrics, theme, availableHeight)
+		contentRows = ld.renderNetwork(metrics, theme, availableHeight)
 	case "cores":
-		ld.renderCores(metrics, theme, availableHeight)
+		contentRows = ld.renderCores(metrics, theme, availableHeight)
 	case "disk":
-		ld.renderDisk(metrics, theme, availableHeight)
+		contentRows = ld.renderDisk(metrics, theme, availableHeight)
 	default:
-		ld.renderDashboard(metrics, theme, availableHeight)
+		contentRows = ld.renderDashboard(metrics, theme, availableHeight)
 	}
 
-	fmt.Print("\033[J")
-	ld.printFooter(theme, footerLines == 2)
+	if len(contentRows) > availableHeight {
+		contentRows = contentRows[:availableHeight]
+	}
+
+	var allRows []string
+	allRows = append(allRows, headerRows...)
+	allRows = append(allRows, contentRows...)
+	allRows = append(allRows, footerRows...)
+
+	if len(allRows) > ld.termHeight {
+		allRows = allRows[:ld.termHeight]
+	}
+
+	var buf bytes.Buffer
+	buf.WriteString("\033[?2026h\033[H")
+	for i, row := range allRows {
+		if i > 0 {
+			buf.WriteString("\r\n")
+		}
+		buf.WriteString(row)
+		buf.WriteString("\033[K")
+	}
+	buf.WriteString("\033[J\033[?2026l")
+
+	os.Stdout.Write(buf.Bytes())
 }
 
 // -------------------------------------------------------------
 // Header & Footer
 // -------------------------------------------------------------
 
-func (ld *LiveDisplay) printHeader(theme Theme) int {
+func (ld *LiveDisplay) getHeaderRows(theme Theme) []string {
 	w := ld.termWidth
+	var rows []string
 
 	// 1. Top Brand Banner with Distro & Clock
 	nowStr := time.Now().Format("15:04:05")
@@ -313,45 +350,65 @@ func (ld *LiveDisplay) printHeader(theme Theme) int {
 		fillLen = 0
 	}
 
-	topBanner := fmt.Sprintf("%s\033[1;7m%s\033[0m\033[38;5;238m%s\033[0m\033[38;5;244m%s\033[0m\033[K\r\n",
+	topBanner := fmt.Sprintf("%s\033[1;7m%s\033[0m\033[38;5;238m%s\033[0m\033[38;5;244m%s\033[0m",
 		theme.Accent, brand, strings.Repeat("─", fillLen), metaStr)
-	fmt.Print(topBanner)
+	rows = append(rows, topBanner)
 
 	// 2. Navigation Tabs (Pill Buttons)
-	tabNames := []struct {
-		id   string
-		name string
-	}{
-		{"dashboard", "1. DASHBOARD"},
-		{"processes", "2. PROCESSES"},
-		{"network", "3. NETWORK"},
-		{"cores", "4. CPU CORES"},
-		{"disk", "5. DISK / IO"},
+	type tabItem struct {
+		id    string
+		full  string
+		short string
+	}
+	tabDefs := []tabItem{
+		{"dashboard", "1. DASHBOARD", "1. DASH"},
+		{"processes", "2. PROCESSES", "2. PROC"},
+		{"network", "3. NETWORK", "3. NET"},
+		{"cores", "4. CPU CORES", "4. CORES"},
+		{"disk", "5. DISK / IO", "5. DISK"},
 	}
 
 	var tabStrs []string
-	for _, t := range tabNames {
+	useShort := w < 95
+	for _, t := range tabDefs {
+		label := t.full
+		if useShort {
+			label = t.short
+		}
 		if ld.tab == t.id {
-			tabStrs = append(tabStrs, fmt.Sprintf("%s\033[1;7m  %s  \033[0m", theme.Accent, t.name))
+			tabStrs = append(tabStrs, fmt.Sprintf("%s\033[1;7m  %s  \033[0m", theme.Accent, label))
 		} else {
-			tabStrs = append(tabStrs, fmt.Sprintf("\033[90m[ \033[37m%s\033[90m ]\033[0m", t.name))
+			tabStrs = append(tabStrs, fmt.Sprintf("\033[90m[ \033[37m%s\033[90m ]\033[0m", label))
 		}
 	}
 
-	tabsLine := "  " + strings.Join(tabStrs, "  ")
-	if ld.termHeight >= 28 {
-		fmt.Printf("\033[K\r\n%s\033[K\r\n\033[K\r\n", tabsLine)
-		return 4
-	} else if ld.termHeight >= 22 {
-		fmt.Printf("%s\033[K\r\n\033[K\r\n", tabsLine)
-		return 3
-	} else {
-		fmt.Printf("%s\033[K\r\n", tabsLine)
-		return 2
+	tabSep := "  "
+	if w < 75 {
+		tabSep = " "
 	}
+	tabsLine := "  " + strings.Join(tabStrs, tabSep)
+	if visualLen(tabsLine) >= w {
+		tabsLine = truncateAnsi(tabsLine, w-1)
+	}
+
+	if ld.termHeight >= 28 {
+		rows = append(rows, "")
+		rows = append(rows, tabsLine)
+		rows = append(rows, "")
+	} else if ld.termHeight >= 22 {
+		rows = append(rows, tabsLine)
+		rows = append(rows, "")
+	} else {
+		rows = append(rows, tabsLine)
+	}
+
+	return rows
 }
 
-func (ld *LiveDisplay) printFooter(theme Theme, withLeadingNewline bool) {
+func (ld *LiveDisplay) getFooterRows(theme Theme, withLeadingBlank bool) []string {
+	var rows []string
+	w := ld.termWidth
+
 	keyQ := fmt.Sprintf("%s\033[1;7m Q \033[0m", theme.Accent)
 	key1 := fmt.Sprintf("%s\033[1;7m 1 \033[0m", theme.Accent)
 	key2 := fmt.Sprintf("%s\033[1;7m 2 \033[0m", theme.Accent)
@@ -359,35 +416,46 @@ func (ld *LiveDisplay) printFooter(theme Theme, withLeadingNewline bool) {
 	key4 := fmt.Sprintf("%s\033[1;7m 4 \033[0m", theme.Accent)
 	key5 := fmt.Sprintf("%s\033[1;7m 5 \033[0m", theme.Accent)
 
-	leftPart := fmt.Sprintf(" %s Quit   %s Dashboard   %s Processes   %s Network   %s Cores   %s Disk/IO", keyQ, key1, key2, key3, key4, key5)
-	rightPart := "\033[90mRefresh: 350ms │ KernelView \033[0m"
+	var leftPart, rightPart string
+	if w >= 105 {
+		leftPart = fmt.Sprintf(" %s Quit   %s Dashboard   %s Processes   %s Network   %s Cores   %s Disk/IO", keyQ, key1, key2, key3, key4, key5)
+		rightPart = "\033[90mRefresh: 350ms │ KernelView \033[0m"
+	} else if w >= 80 {
+		leftPart = fmt.Sprintf(" %s Quit  %s Dash  %s Procs  %s Net  %s Cores  %s Disk", keyQ, key1, key2, key3, key4, key5)
+		rightPart = "\033[90mKernelView \033[0m"
+	} else {
+		leftPart = fmt.Sprintf(" %s Quit  %s-%s Tabs", keyQ, key1, key5)
+		rightPart = ""
+	}
 
 	leftLen := visualLen(leftPart)
 	rightLen := visualLen(rightPart)
-	fillLen := ld.termWidth - leftLen - rightLen - 1
+	fillLen := w - leftLen - rightLen - 1
 	if fillLen < 1 {
 		fillLen = 1
 	}
 
 	footerText := fmt.Sprintf("%s%s%s", leftPart, strings.Repeat(" ", fillLen), rightPart)
-
-	if withLeadingNewline {
-		fmt.Printf("\033[K\r\n%s\033[K", footerText)
-	} else {
-		fmt.Printf("%s\033[K", footerText)
+	if visualLen(footerText) >= w {
+		footerText = truncateAnsi(footerText, w-1)
 	}
+
+	if withLeadingBlank {
+		rows = append(rows, "")
+	}
+	rows = append(rows, footerText)
+	return rows
 }
 
 // -------------------------------------------------------------
 // Tab 1: Dashboard
 // -------------------------------------------------------------
 
-func (ld *LiveDisplay) renderDashboard(metrics *gather.LiveMetrics, theme Theme, availableHeight int) {
+func (ld *LiveDisplay) renderDashboard(metrics *gather.LiveMetrics, theme Theme, availableHeight int) []string {
 	isDualCol := ld.termWidth >= 80 && availableHeight >= 14
 
 	if !isDualCol {
-		ld.renderDashboardSingleCol(metrics, theme, availableHeight)
-		return
+		return ld.renderDashboardSingleCol(metrics, theme, availableHeight)
 	}
 
 	// Dual Column Mode
@@ -544,10 +612,10 @@ func (ld *LiveDisplay) renderDashboard(metrics *gather.LiveMetrics, theme Theme,
 
 	rightCol := append(resBox, procBox...)
 
-	printSideBySide(leftCol, rightCol, 2)
+	return printSideBySide(leftCol, rightCol, 2)
 }
 
-func (ld *LiveDisplay) renderDashboardSingleCol(metrics *gather.LiveMetrics, theme Theme, availableHeight int) {
+func (ld *LiveDisplay) renderDashboardSingleCol(metrics *gather.LiveMetrics, theme Theme, availableHeight int) []string {
 	w := ld.termWidth - 2
 	if w < 40 {
 		w = 40
@@ -562,6 +630,9 @@ func (ld *LiveDisplay) renderDashboardSingleCol(metrics *gather.LiveMetrics, the
 	resLines = append(resLines, fmt.Sprintf("%-10s %s", "RAM Usage:", drawCleanBar(metrics.RAMPercent, barW)))
 	resLines = append(resLines, formatKeyVal("RAM Bytes", fmt.Sprintf("%s / %s", gather.FormatBytes(metrics.RAMUsed), gather.FormatBytes(metrics.RAMTotal)), w-4, theme))
 	resLines = append(resLines, fmt.Sprintf("%-10s %s", "Disk (/):", drawCleanBar(metrics.DiskPercent, barW)))
+	if metrics.GPUMetrics.HasGPU {
+		resLines = append(resLines, fmt.Sprintf("%-10s %s", "GPU Usage:", drawCleanBar(metrics.GPUMetrics.GPUUsage, barW)))
+	}
 
 	resH := len(resLines) + 2
 	resBox := drawBox("◈ Resource Monitor", resLines, w, resH, theme)
@@ -598,16 +669,14 @@ func (ld *LiveDisplay) renderDashboardSingleCol(metrics *gather.LiveMetrics, the
 		allRows = append(allRows, procBox...)
 	}
 
-	for _, l := range allRows {
-		fmt.Printf("%s\033[K\r\n", l)
-	}
+	return allRows
 }
 
 // -------------------------------------------------------------
 // Tab 2: Processes (Full Height & Full Width Table)
 // -------------------------------------------------------------
 
-func (ld *LiveDisplay) renderProcesses(metrics *gather.LiveMetrics, theme Theme, availableHeight int) {
+func (ld *LiveDisplay) renderProcesses(metrics *gather.LiveMetrics, theme Theme, availableHeight int) []string {
 	w := ld.termWidth - 2
 	if w < 50 {
 		w = 50
@@ -667,16 +736,14 @@ func (ld *LiveDisplay) renderProcesses(metrics *gather.LiveMetrics, theme Theme,
 	}
 
 	box := drawBox(fmt.Sprintf("⬢ Process Activity Monitor (%d total processes)", totalProcs), procLines, w, availableHeight, theme)
-	for _, l := range box {
-		fmt.Printf("%s\033[K\r\n", l)
-	}
+	return box
 }
 
 // -------------------------------------------------------------
 // Tab 3: Network (Clean Summary & Interfaces Table)
 // -------------------------------------------------------------
 
-func (ld *LiveDisplay) renderNetwork(metrics *gather.LiveMetrics, theme Theme, availableHeight int) {
+func (ld *LiveDisplay) renderNetwork(metrics *gather.LiveMetrics, theme Theme, availableHeight int) []string {
 	w := ld.termWidth - 2
 	if w < 50 {
 		w = 50
@@ -728,16 +795,14 @@ func (ld *LiveDisplay) renderNetwork(metrics *gather.LiveMetrics, theme Theme, a
 	}
 
 	box := drawBox("▲ Network Interfaces & Bandwidth Monitor", netLines, w, availableHeight, theme)
-	for _, l := range box {
-		fmt.Printf("%s\033[K\r\n", l)
-	}
+	return box
 }
 
 // -------------------------------------------------------------
 // Tab 4: CPU Cores (Per-Core Thread Grid & Telemetry)
 // -------------------------------------------------------------
 
-func (ld *LiveDisplay) renderCores(metrics *gather.LiveMetrics, theme Theme, availableHeight int) {
+func (ld *LiveDisplay) renderCores(metrics *gather.LiveMetrics, theme Theme, availableHeight int) []string {
 	w := ld.termWidth - 2
 	if w < 50 {
 		w = 50
@@ -797,29 +862,26 @@ func (ld *LiveDisplay) renderCores(metrics *gather.LiveMetrics, theme Theme, ava
 	}
 
 	box := drawBox("■ CPU Cores Telemetry & Frequency", coreLines, w, availableHeight, theme)
-	for _, l := range box {
-		fmt.Printf("%s\033[K\r\n", l)
-	}
+	return box
 }
 
 // -------------------------------------------------------------
 // Tab 5: Disk / IO (Storage Pools & Real-Time I/O Telemetry)
 // -------------------------------------------------------------
 
-func (ld *LiveDisplay) renderDisk(metrics *gather.LiveMetrics, theme Theme, availableHeight int) {
+func (ld *LiveDisplay) renderDisk(metrics *gather.LiveMetrics, theme Theme, availableHeight int) []string {
 	w := ld.termWidth - 2
 	if w < 50 {
 		w = 50
 	}
 
 	if availableHeight >= 16 {
-		ld.renderDiskTwoBoxes(metrics, theme, w, availableHeight)
-	} else {
-		ld.renderDiskCompact(metrics, theme, w, availableHeight)
+		return ld.renderDiskTwoBoxes(metrics, theme, w, availableHeight)
 	}
+	return ld.renderDiskCompact(metrics, theme, w, availableHeight)
 }
 
-func (ld *LiveDisplay) renderDiskTwoBoxes(metrics *gather.LiveMetrics, theme Theme, w int, availableHeight int) {
+func (ld *LiveDisplay) renderDiskTwoBoxes(metrics *gather.LiveMetrics, theme Theme, w int, availableHeight int) []string {
 	partCount := len(metrics.DiskPartitions)
 	if partCount == 0 {
 		partCount = 1
@@ -1021,13 +1083,10 @@ func (ld *LiveDisplay) renderDiskTwoBoxes(metrics *gather.LiveMetrics, theme The
 
 	box2 := drawBox("▲ Block Devices & Real-Time I/O Activity", devLines, w, box2H, theme)
 
-	allRows := append(box1, box2...)
-	for _, l := range allRows {
-		fmt.Printf("%s\033[K\r\n", l)
-	}
+	return append(box1, box2...)
 }
 
-func (ld *LiveDisplay) renderDiskCompact(metrics *gather.LiveMetrics, theme Theme, w int, availableHeight int) {
+func (ld *LiveDisplay) renderDiskCompact(metrics *gather.LiveMetrics, theme Theme, w int, availableHeight int) []string {
 	contentW := w - 4
 	var lines []string
 
@@ -1070,9 +1129,7 @@ func (ld *LiveDisplay) renderDiskCompact(metrics *gather.LiveMetrics, theme Them
 	}
 
 	box := drawBox("◆ Disk Storage & Real-Time I/O Telemetry", lines, w, availableHeight, theme)
-	for _, l := range box {
-		fmt.Printf("%s\033[K\r\n", l)
-	}
+	return box
 }
 
 // -------------------------------------------------------------
@@ -1230,7 +1287,7 @@ func drawBox(title string, lines []string, width int, height int, theme Theme) [
 	return box
 }
 
-func printSideBySide(left []string, right []string, spacing int) {
+func printSideBySide(left []string, right []string, spacing int) []string {
 	max := len(left)
 	if len(right) > max {
 		max = len(right)
@@ -1246,6 +1303,7 @@ func printSideBySide(left []string, right []string, spacing int) {
 	}
 
 	spacer := strings.Repeat(" ", spacing)
+	var rows []string
 
 	for i := 0; i < max; i++ {
 		var lPart string
@@ -1262,8 +1320,9 @@ func printSideBySide(left []string, right []string, spacing int) {
 			rPart = strings.Repeat(" ", rightW)
 		}
 
-		fmt.Printf("%s%s%s\033[K\r\n", lPart, spacer, rPart)
+		rows = append(rows, fmt.Sprintf("%s%s%s", lPart, spacer, rPart))
 	}
+	return rows
 }
 
 func formatKeyVal(key string, val string, width int, theme Theme) string {
