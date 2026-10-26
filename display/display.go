@@ -124,6 +124,8 @@ func getDistroKey() string {
 
 			// Exact ID match first
 			switch id {
+			case "generic", "unknown":
+				return "generic"
 			case "manjaro":
 				return "manjaro"
 			case "arch":
@@ -320,7 +322,10 @@ func getDistroKey() string {
 			}
 		}
 	}
-	return "linux"
+	if runtime.GOOS == "linux" {
+		return "linux"
+	}
+	return "generic"
 }
 
 func GetThemeForDistro(distroKey string, noColor bool) Theme {
@@ -676,7 +681,15 @@ func GetThemeForDistro(distroKey string, noColor bool) Theme {
 			Accent:   "\033[1;33m",
 			Reset:    reset,
 		}
-	default: // linux / generic
+	case "generic", "unknown":
+		return Theme{
+			Category: "\033[1;36m", // Bold Cyan
+			Key:      "\033[1;36m",
+			Value:    valColor,
+			Accent:   "\033[1;36m",
+			Reset:    reset,
+		}
+	default: // linux fallback
 		return Theme{
 			Category: "\033[1;33m", // Bold Yellow
 			Key:      "\033[1;33m",
@@ -708,7 +721,11 @@ func getColorBlocks(theme Theme) string {
 func DisplayLayout(logoKey string, infoLines []string, theme Theme) {
 	logoLines, exists := DistroLogos[logoKey]
 	if !exists {
-		logoLines = DistroLogos["linux"]
+		if runtime.GOOS == "linux" {
+			logoLines = DistroLogos["linux"]
+		} else {
+			logoLines = DistroLogos["generic"]
+		}
 	}
 
 	coloredLogoLines := make([]string, len(logoLines))
@@ -814,7 +831,7 @@ func DisplaySystemInfo(info *gather.SystemInfo, theme Theme) {
 	header := fmt.Sprintf("%s%s%s@%s%s%s", theme.Key, username, theme.Reset, theme.Key, hostname, theme.Reset)
 	infoLines = append(infoLines, header)
 
-	separator := theme.Value + strings.Repeat("-", len(username)+1+len(hostname)) + theme.Reset
+	separator := theme.Accent + strings.Repeat("-", len(username)+1+len(hostname)) + theme.Reset
 	infoLines = append(infoLines, separator)
 
 	items := []struct{ Key, Value string }{
@@ -866,67 +883,106 @@ func DisplaySystemInfo(info *gather.SystemInfo, theme Theme) {
 	DisplayLayout(distroKey, infoLines, theme)
 }
 
-// GPULogos holds vendor-specific ASCII art logos for graphics cards
-var GPULogos = map[string][]string{
-	"nvidia": {
-		"  _   ___     _____ ____ ___    _   ",
-		" | \\ | \\ \\   / /_ _|  _ \\_ _|  / \\  ",
-		" |  \\| |\\ \\ / / | || | | | |  / _ \\ ",
-		" | |\\  | \\ V /  | || |_| | | / ___ \\",
-		" |_| \\_|  \\_/  |___|____/___/_/   \\_\\",
-	},
-	"amd": {
-		"  _    __  __ ____  ",
-		" / \\  |  \\/  |  _ \\ ",
-		"/ _ \\ | |\\/| | | | |",
-		" ___ \\| |  | | |_| |",
-		"_/   \\_\\_|  |_|____/ ",
-	},
-	"intel": {
-		" ___ _   _ _____ _____ _     ",
-		"|_ _| \\ | |_   _| ____| |    ",
-		" | ||  \\| | | | |  _| | |    ",
-		" | || |\\  | | | | |___| |___ ",
-		"|___|_| \\_| |_| |_____|_____|",
-	},
-	"qualcomm": {
-		"   _  _ ___  ___ ___ _  _  ___  ",
-		"  /_\\|   \\ _ \\| __| \\| |/ _ \\ ",
-		" / _ \\ |) |   /| _|| .` | (_) |",
-		"/_/ \\_\\___/|_|_\\___|_|\\_|\\___/ ",
-	},
-	"arm": {
-		" __  __   _   _    ___ ",
-		"|  \\/  | /_\\ | |  |_ _|",
-		"| |\\/| |/ _ \\| |__ | | ",
-		"|_|  |_/_/ \\_\\____|___|",
-	},
-	"samsung": {
-		" ___   _   __  __ ___ _  _ _  _  ___ ",
-		"/ __| /_\\ |  \\/  / __| | | | \\| |/ __|",
-		"\\__ \\/ _ \\| |\\/| \\__ \\ |_| | .` | (_ |",
-		"|___/_/ \\_\\_|  |_|___/\\___/|_|\\_|\\___|",
-	},
-	"apple": {
-		"   _   ___ ___ _    ___ ",
-		"  /_\\ | _ \\ _ \\ |  | __|",
-		" / _ \\|  _/  _/ |__| _| ",
-		"/_/ \\_\\_| |_| |____|___|",
-	},
-	"broadcom": {
-		" ____  ____   ___    _    ____   ____ ___  __  __ ",
-		"| __ )|  _ \\ / _ \\  / \\  |  _ \\ / ___/ _ \\|  \\/  |",
-		"|  _ \\| |_) | | | |/ _ \\ | | | | |  | | | | |\\/| |",
-		"| |_) |  _ <| |_| / ___ \\| |_| | |__| |_| | |  | |",
-		"|____/|_| \\_\\\\___/_/   \\_\\____/ \\____\\___/|_|  |_|",
-	},
-	"generic": {
-		"  ____ ____  _   _ ",
-		" / ___|  _ \\| | | |",
-		"| |  _| |_) | | | |",
-		"| |_| |  __/| |_| |",
-		" \\____|_|    \\___/ ",
-	},
+// GetThemeForGPUVendor returns the authentic brand color scheme for a GPU vendor (strictly vendor-based, never distro-based).
+func GetThemeForGPUVendor(vendorKey string) Theme {
+	switch vendorKey {
+	case "nvidia":
+		return Theme{
+			Category: "\033[38;5;82m",  // Nvidia Bright Green
+			Key:      "\033[38;5;82m",
+			Value:    "\033[38;5;249m", // Light Gray
+			Accent:   "\033[38;5;82m",  // Nvidia Bright Green
+			Reset:    "\033[0m",
+		}
+	case "amd":
+		return Theme{
+			Category: "\033[38;5;196m", // Radeon Bright Red
+			Key:      "\033[38;5;196m",
+			Value:    "\033[38;5;249m",
+			Accent:   "\033[38;5;196m", // Radeon Bright Red
+			Reset:    "\033[0m",
+		}
+	case "intel":
+		return Theme{
+			Category: "\033[38;5;33m",  // Intel Blue
+			Key:      "\033[38;5;39m",  // Electric Sky Blue
+			Value:    "\033[38;5;249m",
+			Accent:   "\033[38;5;33m",  // Intel Blue
+			Reset:    "\033[0m",
+		}
+	case "qualcomm":
+		return Theme{
+			Category: "\033[38;5;197m", // Qualcomm Crimson/Red
+			Key:      "\033[38;5;208m", // Snapdragon Orange
+			Value:    "\033[38;5;249m",
+			Accent:   "\033[38;5;197m",
+			Reset:    "\033[0m",
+		}
+	case "broadcom":
+		return Theme{
+			Category: "\033[38;5;196m", // Broadcom Red
+			Key:      "\033[38;5;196m",
+			Value:    "\033[38;5;249m",
+			Accent:   "\033[38;5;196m",
+			Reset:    "\033[0m",
+		}
+	case "arm":
+		return Theme{
+			Category: "\033[38;5;51m",  // ARM Electric Cyan
+			Key:      "\033[38;5;51m",
+			Value:    "\033[38;5;249m",
+			Accent:   "\033[38;5;51m",
+			Reset:    "\033[0m",
+		}
+	case "samsung":
+		return Theme{
+			Category: "\033[38;5;33m",  // Samsung Blue
+			Key:      "\033[38;5;39m",
+			Value:    "\033[38;5;249m",
+			Accent:   "\033[38;5;33m",
+			Reset:    "\033[0m",
+		}
+	case "apple":
+		return Theme{
+			Category: "\033[38;5;255m", // Apple Bright Silver
+			Key:      "\033[38;5;255m",
+			Value:    "\033[38;5;250m",
+			Accent:   "\033[38;5;255m",
+			Reset:    "\033[0m",
+		}
+	case "mediatek":
+		return Theme{
+			Category: "\033[38;5;214m", // MediaTek Orange
+			Key:      "\033[38;5;214m",
+			Value:    "\033[38;5;249m",
+			Accent:   "\033[38;5;214m",
+			Reset:    "\033[0m",
+		}
+	case "rockchip":
+		return Theme{
+			Category: "\033[38;5;39m",  // Rockchip Cyan
+			Key:      "\033[38;5;39m",
+			Value:    "\033[38;5;249m",
+			Accent:   "\033[38;5;39m",
+			Reset:    "\033[0m",
+		}
+	case "riscv":
+		return Theme{
+			Category: "\033[38;5;45m",  // RISC-V Teal
+			Key:      "\033[38;5;45m",
+			Value:    "\033[38;5;249m",
+			Accent:   "\033[38;5;45m",
+			Reset:    "\033[0m",
+		}
+	default: // generic GPU hardware (strictly vendor-neutral hardware cyan, not distro)
+		return Theme{
+			Category: "\033[38;5;45m",  // Hardware Neon Cyan
+			Key:      "\033[38;5;45m",
+			Value:    "\033[38;5;249m",
+			Accent:   "\033[38;5;45m",
+			Reset:    "\033[0m",
+		}
+	}
 }
 
 // DisplayGPUInfo formats and prints detailed GPU and graphics API information (exported).
@@ -938,7 +994,7 @@ func DisplayGPUInfo(info *gather.GPUDetails, theme Theme) {
 		vendorKey = "intel"
 	} else if strings.Contains(vendorKey, "amd") || strings.Contains(vendorKey, "advanced micro") || strings.Contains(vendorKey, "radeon") || strings.Contains(vendorKey, "ati") {
 		vendorKey = "amd"
-	} else if strings.Contains(vendorKey, "qualcomm") || strings.Contains(vendorKey, "adreno") {
+	} else if strings.Contains(vendorKey, "qualcomm") || strings.Contains(vendorKey, "adreno") || strings.Contains(vendorKey, "snapdragon") {
 		vendorKey = "qualcomm"
 	} else if strings.Contains(vendorKey, "apple") {
 		vendorKey = "apple"
@@ -946,8 +1002,14 @@ func DisplayGPUInfo(info *gather.GPUDetails, theme Theme) {
 		vendorKey = "broadcom"
 	} else if strings.Contains(vendorKey, "arm") || strings.Contains(vendorKey, "mali") {
 		vendorKey = "arm"
-	} else if strings.Contains(vendorKey, "samsung") {
+	} else if strings.Contains(vendorKey, "samsung") || strings.Contains(vendorKey, "exynos") {
 		vendorKey = "samsung"
+	} else if strings.Contains(vendorKey, "mediatek") || strings.Contains(vendorKey, "dimensity") {
+		vendorKey = "mediatek"
+	} else if strings.Contains(vendorKey, "rockchip") {
+		vendorKey = "rockchip"
+	} else if strings.Contains(vendorKey, "riscv") || strings.Contains(vendorKey, "starfive") || strings.Contains(vendorKey, "sifive") {
+		vendorKey = "riscv"
 	}
 
 	if vendorKey == "" || vendorKey == "unknown" {
@@ -962,83 +1024,23 @@ func DisplayGPUInfo(info *gather.GPUDetails, theme Theme) {
 			vendorKey = "apple"
 		} else if strings.Contains(lowerName, "broadcom") || strings.Contains(lowerName, "videocore") {
 			vendorKey = "broadcom"
-		} else if strings.Contains(lowerName, "qualcomm") || strings.Contains(lowerName, "adreno") {
+		} else if strings.Contains(lowerName, "qualcomm") || strings.Contains(lowerName, "adreno") || strings.Contains(lowerName, "snapdragon") {
 			vendorKey = "qualcomm"
 		} else if strings.Contains(lowerName, "arm") || strings.Contains(lowerName, "mali") {
 			vendorKey = "arm"
+		} else if strings.Contains(lowerName, "samsung") || strings.Contains(lowerName, "exynos") {
+			vendorKey = "samsung"
+		} else if strings.Contains(lowerName, "mediatek") || strings.Contains(lowerName, "dimensity") {
+			vendorKey = "mediatek"
+		} else if strings.Contains(lowerName, "rockchip") {
+			vendorKey = "rockchip"
+		} else if strings.Contains(lowerName, "riscv") || strings.Contains(lowerName, "starfive") || strings.Contains(lowerName, "sifive") {
+			vendorKey = "riscv"
 		}
 	}
 
 	if theme != BlankTheme {
-		switch vendorKey {
-		case "nvidia":
-			theme = Theme{
-				Category: "\033[32m",       // Green
-				Key:      "\033[38;5;82m",  // Bright Green
-				Value:    "\033[38;5;249m", // Light Gray
-				Accent:   "\033[38;5;82m",  // Bright Green
-				Reset:    "\033[0m",
-			}
-		case "amd":
-			theme = Theme{
-				Category: "\033[31m",       // Red
-				Key:      "\033[38;5;196m", // Bright Red
-				Value:    "\033[38;5;249m", // Light Gray
-				Accent:   "\033[38;5;196m", // Bright Red
-				Reset:    "\033[0m",
-			}
-		case "intel":
-			theme = Theme{
-				Category: "\033[34m",       // Blue
-				Key:      "\033[38;5;33m",  // Intel Blue
-				Value:    "\033[38;5;249m", // Light Gray
-				Accent:   "\033[38;5;33m",  // Intel Blue
-				Reset:    "\033[0m",
-			}
-		case "qualcomm":
-			theme = Theme{
-				Category: "\033[31m",       // Red/Orange
-				Key:      "\033[38;5;208m", // Qualcomm Orange
-				Value:    "\033[38;5;249m", // Light Gray
-				Accent:   "\033[38;5;208m", // Qualcomm Orange
-				Reset:    "\033[0m",
-			}
-		case "broadcom":
-			theme = Theme{
-				Category: "\033[31m",       // Red
-				Key:      "\033[38;5;196m", // Red
-				Value:    "\033[38;5;249m", // Light Gray
-				Accent:   "\033[38;5;196m", // Red
-				Reset:    "\033[0m",
-			}
-		case "arm":
-			theme = Theme{
-				Category: "\033[36m",       // Cyan
-				Key:      "\033[38;5;51m",  // Bright Cyan
-				Value:    "\033[38;5;249m", // Light Gray
-				Accent:   "\033[38;5;51m",  // Bright Cyan
-				Reset:    "\033[0m",
-			}
-		case "samsung":
-			theme = Theme{
-				Category: "\033[34m",       // Blue
-				Key:      "\033[38;5;39m",  // Samsung Blue
-				Value:    "\033[38;5;249m", // Light Gray
-				Accent:   "\033[38;5;39m",  // Samsung Blue
-				Reset:    "\033[0m",
-			}
-		case "apple":
-			theme = Theme{
-				Category: "\033[37m",       // White/Silver
-				Key:      "\033[38;5;255m", // Bright White
-				Value:    "\033[38;5;249m", // Light Gray
-				Accent:   "\033[38;5;255m", // Bright White
-				Reset:    "\033[0m",
-			}
-		default:
-			distroKey := getDistroKey()
-			theme = GetThemeForDistro(distroKey, false)
-		}
+		theme = GetThemeForGPUVendor(vendorKey)
 	}
 
 	termWidth := getTerminalWidth()
@@ -1069,7 +1071,7 @@ func DisplayGPUInfo(info *gather.GPUDetails, theme Theme) {
 	header := fmt.Sprintf("%s%s%s@%s%s%s", theme.Key, username, theme.Reset, theme.Key, hostname, theme.Reset)
 	infoLines = append(infoLines, header)
 
-	separator := theme.Value + strings.Repeat("-", len(username)+1+len(hostname)) + theme.Reset
+	separator := theme.Accent + strings.Repeat("-", len(username)+1+len(hostname)) + theme.Reset
 	infoLines = append(infoLines, separator)
 
 	var vramCombined string
@@ -1147,7 +1149,7 @@ func DisplayGPUInfo(info *gather.GPUDetails, theme Theme) {
 	}
 
 	// Draw side-by-side or stacked layout using the vendor logo
-	sideBySide := termWidth >= logoWidth+45
+	sideBySide := termWidth >= logoWidth+30
 	if sideBySide {
 		maxLines := len(logoLines)
 		if len(infoLines) > maxLines {
