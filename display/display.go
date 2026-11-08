@@ -1188,6 +1188,116 @@ func DisplayGPUInfo(info *gather.GPUDetails, theme Theme) {
 	}
 }
 
+// DisplayKernelInfo formats and prints essential kernel parameters, modules, security, and mitigations (exported).
+func DisplayKernelInfo(info *gather.KernelDetails, theme Theme) {
+	distroKey := getDistroKey()
+	theme = GetThemeForDistro(distroKey, theme == BlankTheme)
+
+	termWidth := getTerminalWidth()
+	logoWidth := 0
+	if logoLines, exists := DistroLogos[distroKey]; exists {
+		for _, l := range logoLines {
+			runesCount := utf8.RuneCountInString(l)
+			if runesCount > logoWidth {
+				logoWidth = runesCount
+			}
+		}
+	} else {
+		logoWidth = 16
+	}
+
+	var infoLines []string
+
+	username := getUsername()
+	hostname, _ := os.Hostname()
+	if hostname == "" {
+		hostname = "unknown"
+	}
+
+	header := fmt.Sprintf("%s%s%s@%s%s%s (Kernel)", theme.Key, username, theme.Reset, theme.Key, hostname, theme.Reset)
+	infoLines = append(infoLines, header)
+
+	separator := theme.Accent + strings.Repeat("-", len(username)+1+len(hostname)+9) + theme.Reset
+	infoLines = append(infoLines, separator)
+
+	// Build summary
+	var buildParts []string
+	if info.Compiler != "" {
+		buildParts = append(buildParts, info.Compiler)
+	}
+	if info.Preemption != "" {
+		buildParts = append(buildParts, info.Preemption)
+	}
+	if info.BuildDate != "" {
+		buildParts = append(buildParts, info.BuildDate)
+	}
+	buildCombined := strings.Join(buildParts, ", ")
+
+	// Modules combined (loaded + memory + unloaded)
+	var modulesCombined string
+	if info.LoadedModulesCount > 0 {
+		if info.LoadedModulesMemory != "" {
+			modulesCombined = fmt.Sprintf("%d loaded (%s)", info.LoadedModulesCount, info.LoadedModulesMemory)
+		} else {
+			modulesCombined = fmt.Sprintf("%d loaded", info.LoadedModulesCount)
+		}
+		if info.UnloadedModulesCount > 0 {
+			modulesCombined += fmt.Sprintf(" / %d unloaded", info.UnloadedModulesCount)
+		}
+	}
+
+	kernelCombined := info.Release
+	if info.Architecture != "" {
+		kernelCombined = fmt.Sprintf("%s (%s)", info.Release, info.Architecture)
+	}
+
+	cmdLine := info.CleanCommandLine
+	if cmdLine == "" {
+		cmdLine = info.CommandLine
+	}
+
+	items := []struct{ Key, Value string }{
+		{"Kernel", kernelCombined},
+		{"Build", buildCombined},
+		{"Command Line", cmdLine},
+		{"Modules", modulesCombined},
+		{"Dependencies", info.TopDependencies},
+		{"Kernel Taint", info.TaintStatus},
+		{"Secure Boot", info.SecureBoot},
+		{"Lockdown", info.Lockdown},
+		{"Security", info.SecurityLSM},
+		{"KASLR", info.KASLR},
+		{"eBPF JIT", info.EBPFJIT},
+		{"CPU Scaling", info.CPUScaling},
+		{"Clock Source", info.ClockSource},
+		{"Mitigations", info.Mitigations},
+		{"Kernel Updates", info.UpdateStatus},
+	}
+
+	for _, item := range items {
+		val := strings.TrimSpace(item.Value)
+		if val != "" && val != "Unknown" && val != "None" && val != "N/A" {
+			valAllowed := termWidth - logoWidth - 3 - len(item.Key) - 4
+			if valAllowed > 5 {
+				val = truncateString(val, valAllowed)
+			}
+			line := fmt.Sprintf("%s%s%s: %s%s%s", theme.Key, item.Key, theme.Reset, theme.Value, val, theme.Reset)
+			infoLines = append(infoLines, line)
+		}
+	}
+
+	blocks := getColorBlocks(theme)
+	if blocks != "" {
+		infoLines = append(infoLines, "")
+		blockLines := strings.Split(blocks, "\n")
+		for _, bl := range blockLines {
+			infoLines = append(infoLines, bl)
+		}
+	}
+
+	DisplayLayout(distroKey, infoLines, theme)
+}
+
 // DisplayProcessList formats and prints the process list (Wider & Centered Title).
 func DisplayProcessList(processList []gather.ProcessInfo, theme Theme) {
 
@@ -1496,6 +1606,7 @@ func PrintHelp(version string, noColor bool) {
 	fmt.Printf("  %s-p, --process%s      %sDisplay static list of running processes%s\n", theme.Key, theme.Reset, theme.Value, theme.Reset)
 	fmt.Printf("  %s-n, --network%s      %sDisplay detailed static network interfaces & stats%s\n", theme.Key, theme.Reset, theme.Value, theme.Reset)
 	fmt.Printf("  %s-g, --gpu%s          %sDisplay detailed static GPU & graphics API report%s\n", theme.Key, theme.Reset, theme.Value, theme.Reset)
+	fmt.Printf("  %s-k, --kernel%s       %sDisplay detailed kernel parameters, modules, security & mitigations%s\n", theme.Key, theme.Reset, theme.Value, theme.Reset)
 	fmt.Printf("  %s[default]%s          %sDisplay system fetch (fastfetch-like distro ASCII logo & specs)%s\n\n", theme.Key, theme.Reset, theme.Value, theme.Reset)
 
 	// Section 3: Configuration Options
@@ -1519,6 +1630,7 @@ func PrintHelp(version string, noColor bool) {
 	fmt.Printf("  $ kernelview --live            %s# Open the live TUI dashboard%s\n", "\033[90m", theme.Reset)
 	fmt.Printf("  $ kernelview -p --json         %s# Fetch running processes in JSON format%s\n", "\033[90m", theme.Reset)
 	fmt.Printf("  $ kernelview -g                %s# Display detailed GPU and graphics API report%s\n", "\033[90m", theme.Reset)
+	fmt.Printf("  $ kernelview -k                %s# Display detailed kernel security, modules & mitigations%s\n", "\033[90m", theme.Reset)
 	fmt.Printf("  $ kernelview -f                %s# Fast system fetch with ASCII logo%s\n\n", "\033[90m", theme.Reset)
 
 	// Footer with Color Grid blocks

@@ -15,7 +15,7 @@ import (
 var version = "v1.4.0-nightly"
 
 // handleJSONOutput handles all --json flag requests
-func handleJSONOutput(processFlag, networkFlag, gpuFlag, fastFlag bool) {
+func handleJSONOutput(processFlag, networkFlag, gpuFlag, kernelFlag, fastFlag bool) {
 	encoder := json.NewEncoder(os.Stdout)
 	encoder.SetIndent("", "  ") // Pretty-print JSON
 
@@ -34,6 +34,8 @@ func handleJSONOutput(processFlag, networkFlag, gpuFlag, fastFlag bool) {
 		}
 	} else if gpuFlag {
 		data = gather.GetGPUDetails()
+	} else if kernelFlag {
+		data = gather.GetKernelDetails()
 	} else {
 		data = gather.GetSystemInfo(fastFlag)
 	}
@@ -61,6 +63,10 @@ func main() {
 	var gpuFlag bool
 	flag.BoolVar(&gpuFlag, "gpu", false, "Display detailed GPU and graphics API report.")
 	flag.BoolVar(&gpuFlag, "g", false, "Display detailed GPU and graphics API report (shorthand).")
+
+	var kernelFlag bool
+	flag.BoolVar(&kernelFlag, "kernel", false, "Display detailed kernel parameters, modules, security & mitigations.")
+	flag.BoolVar(&kernelFlag, "k", false, "Display detailed kernel parameters, modules, security & mitigations (shorthand).")
 
 	var liveFlag bool
 	flag.BoolVar(&liveFlag, "live", false, "Start real-time live system monitoring dashboard.")
@@ -121,16 +127,19 @@ func main() {
 	if gpuFlag {
 		modeCount++
 	}
+	if kernelFlag {
+		modeCount++
+	}
 
 	if modeCount > 1 {
-		fmt.Fprintf(os.Stderr, "Error: -f, -p, -n, and -g flags are mutually exclusive.\n\n")
+		fmt.Fprintf(os.Stderr, "Error: -f, -p, -n, -g, and -k flags are mutually exclusive.\n\n")
 		flag.Usage()
 		os.Exit(1)
 	}
 
 	// 3. Handle JSON output
 	if jsonFlag {
-		handleJSONOutput(processFlag, networkFlag, gpuFlag, fastFlag)
+		handleJSONOutput(processFlag, networkFlag, gpuFlag, kernelFlag, fastFlag)
 		os.Exit(0)
 	}
 
@@ -145,6 +154,8 @@ func main() {
 		mode = "network"
 	} else if gpuFlag {
 		mode = "gpu"
+	} else if kernelFlag {
+		mode = "kernel"
 	}
 
 	// Select theme
@@ -177,6 +188,9 @@ func main() {
 	case "gpu":
 		gpuDetails := gather.GetGPUDetails()
 		display.DisplayGPUInfo(gpuDetails, currentTheme)
+	case "kernel":
+		kernelDetails := gather.GetKernelDetails()
+		display.DisplayKernelInfo(kernelDetails, currentTheme)
 	default: // "system" mode
 		info := gather.GetSystemInfo(fastFlag) // Pass fastFlag here
 		display.DisplaySystemInfo(info, currentTheme)
