@@ -1498,255 +1498,286 @@ func GetPackageCounts() string {
 		f    func() int
 	}
 
-	checks := []pmCheck{
-		{"Pacman", func() int {
-			files, err := os.ReadDir("/var/lib/pacman/local")
-			if err != nil {
-				return 0
-			}
-			count := 0
-			for _, f := range files {
-				if f.IsDir() && !strings.HasPrefix(f.Name(), ".") {
+	var checks []pmCheck
+
+	if runtime.GOOS == "linux" {
+		checks = []pmCheck{
+			{"Pacman", func() int {
+				files, err := os.ReadDir("/var/lib/pacman/local")
+				if err != nil {
+					return 0
+				}
+				count := 0
+				for _, f := range files {
+					if f.IsDir() && !strings.HasPrefix(f.Name(), ".") {
+						count++
+					}
+				}
+				return count
+			}},
+			{"Dpkg", func() int {
+				data, err := os.ReadFile("/var/lib/dpkg/status")
+				if err != nil {
+					return 0
+				}
+				count := bytes.Count(data, []byte("\nPackage: "))
+				if bytes.HasPrefix(data, []byte("Package: ")) {
 					count++
 				}
-			}
-			return count
-		}},
-		{"Dpkg", func() int {
-			data, err := os.ReadFile("/var/lib/dpkg/status")
-			if err != nil {
-				return 0
-			}
-			count := bytes.Count(data, []byte("\nPackage: "))
-			if bytes.HasPrefix(data, []byte("Package: ")) {
-				count++
-			}
-			return count
-		}},
-		{"RPM", func() int {
-			// Fast path 1: Direct SQLite B-tree header counting (< 1ms)
-			rpmDBPaths := []string{
-				"/var/lib/rpm/rpmdb.sqlite",
-				"/usr/lib/sysimage/rpm/rpmdb.sqlite",
-				"/var/lib/rpm/Packages.db",
-				"/usr/lib/sysimage/rpm/Packages.db",
-			}
-			for _, p := range rpmDBPaths {
-				if count := countRPMFromSQLite(p); count > 0 {
-					return count
+				return count
+			}},
+			{"RPM", func() int {
+				rpmDBPaths := []string{
+					"/var/lib/rpm/rpmdb.sqlite",
+					"/usr/lib/sysimage/rpm/rpmdb.sqlite",
+					"/var/lib/rpm/Packages.db",
+					"/usr/lib/sysimage/rpm/Packages.db",
 				}
-			}
-
-			// Fast path 2: Non-verifying rpm query with tight timeout
-			if _, err := exec.LookPath("rpm"); err == nil {
-				ctx, cancel := context.WithTimeout(context.Background(), 350*time.Millisecond)
-				defer cancel()
-				cmd := exec.CommandContext(ctx, "rpm", "-qa", "--nodigest", "--nosignature", "--qf", ".\n")
-				if out, err := cmd.Output(); err == nil {
-					count := bytes.Count(out, []byte("\n"))
-					if count > 0 {
+				for _, p := range rpmDBPaths {
+					if count := countRPMFromSQLite(p); count > 0 {
 						return count
 					}
 				}
-			}
-			return 0
-		}},
-		{"APK", func() int {
-			data, err := os.ReadFile("/lib/apk/db/installed")
-			if err != nil {
+				if _, err := exec.LookPath("rpm"); err == nil {
+					ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+					defer cancel()
+					cmd := exec.CommandContext(ctx, "rpm", "-qa", "--nodigest", "--nosignature", "--qf", ".\n")
+					if out, err := cmd.Output(); err == nil {
+						count := bytes.Count(out, []byte("\n"))
+						if count > 0 {
+							return count
+						}
+					}
+				}
 				return 0
-			}
-			count := bytes.Count(data, []byte("\nP:"))
-			if bytes.HasPrefix(data, []byte("P:")) {
-				count++
-			}
-			return count
-		}},
-		{"XBPS", func() int {
-			dirs, err := os.ReadDir("/var/db/xbps")
-			if err != nil {
-				return 0
-			}
-			count := 0
-			for _, d := range dirs {
-				if strings.HasPrefix(d.Name(), "pkg-") || strings.HasSuffix(d.Name(), ".plist") {
+			}},
+			{"APK", func() int {
+				data, err := os.ReadFile("/lib/apk/db/installed")
+				if err != nil {
+					return 0
+				}
+				count := bytes.Count(data, []byte("\nP:"))
+				if bytes.HasPrefix(data, []byte("P:")) {
 					count++
 				}
-			}
-			return count
-		}},
-		{"Portage", func() int {
-			cats, err := os.ReadDir("/var/db/pkg")
-			if err != nil {
-				return 0
-			}
-			count := 0
-			for _, cat := range cats {
-				if cat.IsDir() && !strings.HasPrefix(cat.Name(), ".") {
-					if pkgs, err := os.ReadDir("/var/db/pkg/" + cat.Name()); err == nil {
-						for _, p := range pkgs {
-							if p.IsDir() && !strings.HasPrefix(p.Name(), ".") {
+				return count
+			}},
+			{"XBPS", func() int {
+				dirs, err := os.ReadDir("/var/db/xbps")
+				if err != nil {
+					return 0
+				}
+				count := 0
+				for _, d := range dirs {
+					if strings.HasPrefix(d.Name(), "pkg-") || strings.HasSuffix(d.Name(), ".plist") {
+						count++
+					}
+				}
+				return count
+			}},
+			{"Portage", func() int {
+				cats, err := os.ReadDir("/var/db/pkg")
+				if err != nil {
+					return 0
+				}
+				count := 0
+				for _, cat := range cats {
+					if cat.IsDir() && !strings.HasPrefix(cat.Name(), ".") {
+						if pkgs, err := os.ReadDir("/var/db/pkg/" + cat.Name()); err == nil {
+							for _, p := range pkgs {
+								if p.IsDir() && !strings.HasPrefix(p.Name(), ".") {
+									count++
+								}
+							}
+						}
+					}
+				}
+				return count
+			}},
+			{"Nix", func() int {
+				count := 0
+				for _, p := range []string{"/nix/var/nix/profiles/default", "/nix/var/nix/profiles/system"} {
+					if dirs, err := os.ReadDir(p); err == nil {
+						for _, d := range dirs {
+							if !strings.HasPrefix(d.Name(), ".") {
 								count++
 							}
 						}
 					}
 				}
-			}
-			return count
-		}},
-		{"Nix", func() int {
-			count := 0
-			for _, p := range []string{"/nix/var/nix/profiles/default", "/nix/var/nix/profiles/system"} {
-				if dirs, err := os.ReadDir(p); err == nil {
-					for _, d := range dirs {
-						if !strings.HasPrefix(d.Name(), ".") {
-							count++
-						}
-					}
-				}
-			}
-			return count
-		}},
-		{"Flatpak", func() int {
-			count := 0
-			if dirs, err := os.ReadDir("/var/lib/flatpak/app"); err == nil {
-				for _, d := range dirs {
-					if d.IsDir() && !strings.HasPrefix(d.Name(), ".") {
-						count++
-					}
-				}
-			}
-			home := os.Getenv("HOME")
-			if home != "" {
-				if dirs, err := os.ReadDir(home + "/.local/share/flatpak/app"); err == nil {
-					for _, d := range dirs {
-						if d.IsDir() && !strings.HasPrefix(d.Name(), ".") {
-							count++
-						}
-					}
-				}
-			}
-			return count
-		}},
-		{"Snap", func() int {
-			files, err := os.ReadDir("/var/lib/snapd/snaps")
-			if err != nil {
-				return 0
-			}
-			count := 0
-			for _, f := range files {
-				if !f.IsDir() && strings.HasSuffix(f.Name(), ".snap") {
-					count++
-				}
-			}
-			return count
-		}},
-		{"Brew", func() int {
-			count := 0
-			for _, path := range []string{"/opt/homebrew/Cellar", "/usr/local/Cellar", "/home/linuxbrew/.linuxbrew/Cellar"} {
-				if dirs, err := os.ReadDir(path); err == nil {
-					for _, d := range dirs {
-						if d.IsDir() && !strings.HasPrefix(d.Name(), ".") {
-							count++
-						}
-					}
-				}
-			}
-			for _, path := range []string{"/opt/homebrew/Caskroom", "/usr/local/Caskroom", "/home/linuxbrew/.linuxbrew/Caskroom"} {
-				if dirs, err := os.ReadDir(path); err == nil {
-					for _, d := range dirs {
-						if d.IsDir() && !strings.HasPrefix(d.Name(), ".") {
-							count++
-						}
-					}
-				}
-			}
-			return count
-		}},
-		{"MacPorts", func() int {
-			count := 0
-			if dirs, err := os.ReadDir("/opt/local/var/macports/software"); err == nil {
-				for _, d := range dirs {
-					if d.IsDir() && !strings.HasPrefix(d.Name(), ".") {
-						count++
-					}
-				}
-			}
-			return count
-		}},
-		{"Scoop", func() int {
-			count := 0
-			home := os.Getenv("USERPROFILE")
-			if home == "" {
-				home = os.Getenv("HOME")
-			}
-			if home != "" {
-				if dirs, err := os.ReadDir(home + "/scoop/apps"); err == nil {
-					for _, d := range dirs {
-						if d.IsDir() && !strings.HasPrefix(d.Name(), ".") && d.Name() != "scoop" {
-							count++
-						}
-					}
-				}
-			}
-			return count
-		}},
-		{"Chocolatey", func() int {
-			count := 0
-			chocoPaths := []string{
-				os.Getenv("ChocolateyInstall") + "/lib",
-				"C:/ProgramData/chocolatey/lib",
-			}
-			for _, p := range chocoPaths {
-				if p == "/lib" || p == "" {
-					continue
-				}
-				if dirs, err := os.ReadDir(p); err == nil {
-					for _, d := range dirs {
-						if d.IsDir() && !strings.HasPrefix(d.Name(), ".") && !strings.EqualFold(d.Name(), "chocolatey") {
-							count++
-						}
-					}
-					if count > 0 {
-						break
-					}
-				}
-			}
-			return count
-		}},
-		{"Winget", func() int {
-			count := 0
-			localAppData := os.Getenv("LOCALAPPDATA")
-			if localAppData != "" {
-				if dirs, err := os.ReadDir(localAppData + "/Microsoft/WinGet/Packages"); err == nil {
-					for _, d := range dirs {
-						if d.IsDir() && !strings.HasPrefix(d.Name(), ".") {
-							count++
-						}
-					}
-				}
-			}
-			return count
-		}},
-		{"BSD Pkg", func() int {
-			if runtime.GOOS != "freebsd" && runtime.GOOS != "openbsd" && runtime.GOOS != "netbsd" {
-				return 0
-			}
-			if count := countRPMFromSQLite("/var/db/pkg/local.sqlite"); count > 0 {
 				return count
-			}
-			dirs, err := os.ReadDir("/var/db/pkg")
-			if err != nil {
-				return 0
-			}
-			count := 0
-			for _, d := range dirs {
-				if d.IsDir() && !strings.HasPrefix(d.Name(), ".") {
-					count++
+			}},
+			{"Flatpak", func() int {
+				count := 0
+				if dirs, err := os.ReadDir("/var/lib/flatpak/app"); err == nil {
+					for _, d := range dirs {
+						if d.IsDir() && !strings.HasPrefix(d.Name(), ".") {
+							count++
+						}
+					}
 				}
-			}
-			return count
-		}},
+				home := os.Getenv("HOME")
+				if home != "" {
+					if dirs, err := os.ReadDir(home + "/.local/share/flatpak/app"); err == nil {
+						for _, d := range dirs {
+							if d.IsDir() && !strings.HasPrefix(d.Name(), ".") {
+								count++
+							}
+						}
+					}
+				}
+				return count
+			}},
+			{"Snap", func() int {
+				files, err := os.ReadDir("/var/lib/snapd/snaps")
+				if err != nil {
+					return 0
+				}
+				count := 0
+				for _, f := range files {
+					if !f.IsDir() && strings.HasSuffix(f.Name(), ".snap") {
+						count++
+					}
+				}
+				return count
+			}},
+			{"Brew", func() int {
+				count := 0
+				if dirs, err := os.ReadDir("/home/linuxbrew/.linuxbrew/Cellar"); err == nil {
+					for _, d := range dirs {
+						if d.IsDir() && !strings.HasPrefix(d.Name(), ".") {
+							count++
+						}
+					}
+				}
+				return count
+			}},
+		}
+	} else if runtime.GOOS == "darwin" {
+		checks = []pmCheck{
+			{"Brew", func() int {
+				count := 0
+				for _, path := range []string{"/opt/homebrew/Cellar", "/usr/local/Cellar"} {
+					if dirs, err := os.ReadDir(path); err == nil {
+						for _, d := range dirs {
+							if d.IsDir() && !strings.HasPrefix(d.Name(), ".") {
+								count++
+							}
+						}
+					}
+				}
+				for _, path := range []string{"/opt/homebrew/Caskroom", "/usr/local/Caskroom"} {
+					if dirs, err := os.ReadDir(path); err == nil {
+						for _, d := range dirs {
+							if d.IsDir() && !strings.HasPrefix(d.Name(), ".") {
+								count++
+							}
+						}
+					}
+				}
+				return count
+			}},
+			{"MacPorts", func() int {
+				count := 0
+				if dirs, err := os.ReadDir("/opt/local/var/macports/software"); err == nil {
+					for _, d := range dirs {
+						if d.IsDir() && !strings.HasPrefix(d.Name(), ".") {
+							count++
+						}
+					}
+				}
+				return count
+			}},
+			{"Nix", func() int {
+				count := 0
+				for _, p := range []string{"/nix/var/nix/profiles/default", "/nix/var/nix/profiles/system"} {
+					if dirs, err := os.ReadDir(p); err == nil {
+						for _, d := range dirs {
+							if !strings.HasPrefix(d.Name(), ".") {
+								count++
+							}
+						}
+					}
+				}
+				return count
+			}},
+		}
+	} else if runtime.GOOS == "windows" {
+		checks = []pmCheck{
+			{"Scoop", func() int {
+				count := 0
+				home := os.Getenv("USERPROFILE")
+				if home == "" {
+					home = os.Getenv("HOME")
+				}
+				if home != "" {
+					if dirs, err := os.ReadDir(home + "/scoop/apps"); err == nil {
+						for _, d := range dirs {
+							if d.IsDir() && !strings.HasPrefix(d.Name(), ".") && d.Name() != "scoop" {
+								count++
+							}
+						}
+					}
+				}
+				return count
+			}},
+			{"Chocolatey", func() int {
+				count := 0
+				chocoPaths := []string{
+					os.Getenv("ChocolateyInstall") + "/lib",
+					"C:/ProgramData/chocolatey/lib",
+				}
+				for _, p := range chocoPaths {
+					if p == "/lib" || p == "" {
+						continue
+					}
+					if dirs, err := os.ReadDir(p); err == nil {
+						for _, d := range dirs {
+							if d.IsDir() && !strings.HasPrefix(d.Name(), ".") && !strings.EqualFold(d.Name(), "chocolatey") {
+								count++
+							}
+						}
+						if count > 0 {
+							break
+						}
+					}
+				}
+				return count
+			}},
+			{"Winget", func() int {
+				count := 0
+				localAppData := os.Getenv("LOCALAPPDATA")
+				if localAppData != "" {
+					if dirs, err := os.ReadDir(localAppData + "/Microsoft/WinGet/Packages"); err == nil {
+						for _, d := range dirs {
+							if d.IsDir() && !strings.HasPrefix(d.Name(), ".") {
+								count++
+							}
+						}
+					}
+				}
+				return count
+			}},
+		}
+	} else {
+		checks = []pmCheck{
+			{"BSD Pkg", func() int {
+				if count := countRPMFromSQLite("/var/db/pkg/local.sqlite"); count > 0 {
+					return count
+				}
+				dirs, err := os.ReadDir("/var/db/pkg")
+				if err != nil {
+					return 0
+				}
+				count := 0
+				for _, d := range dirs {
+					if d.IsDir() && !strings.HasPrefix(d.Name(), ".") {
+						count++
+					}
+				}
+				return count
+			}},
+		}
 	}
 
 	for _, check := range checks {
@@ -1837,67 +1868,96 @@ func cleanISPName(raw string) string {
 }
 
 func getPublicIPInfo() (ip, isp, city, country string, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2500*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 750*time.Millisecond)
 	defer cancel()
 
+	type ipResult struct {
+		ip, isp, city, country string
+		err                    error
+		hasGeo                 bool
+	}
+
+	ch := make(chan ipResult, 2)
 	client := http.Client{
-		Transport: &http.Transport{
-			DisableKeepAlives: true,
-		},
+		Timeout: 700 * time.Millisecond,
 	}
 
-	// Provider 1: ipinfo.io (HTTPS, detailed and reliable)
-	req1, errReq1 := http.NewRequestWithContext(ctx, "GET", "https://ipinfo.io/json", nil)
-	if errReq1 == nil {
-		req1.Header.Set("User-Agent", "KernelView-Go")
-		if resp1, err1 := client.Do(req1); err1 == nil {
-			var ipInfo struct {
-				IP      string `json:"ip"`
-				City    string `json:"city"`
-				Region  string `json:"region"`
-				Country string `json:"country"`
-				Org     string `json:"org"`
+	// Provider 1: ipinfo.io (detailed: ip, isp, city, country)
+	go func() {
+		req, errReq := http.NewRequestWithContext(ctx, "GET", "https://ipinfo.io/json", nil)
+		if errReq != nil {
+			ch <- ipResult{err: errReq}
+			return
+		}
+		req.Header.Set("User-Agent", "KernelView-Go")
+		resp, err := client.Do(req)
+		if err != nil {
+			ch <- ipResult{err: err}
+			return
+		}
+		defer resp.Body.Close()
+		var ipInfo struct {
+			IP      string `json:"ip"`
+			City    string `json:"city"`
+			Region  string `json:"region"`
+			Country string `json:"country"`
+			Org     string `json:"org"`
+		}
+		if errDecode := json.NewDecoder(io.LimitReader(resp.Body, 32*1024)).Decode(&ipInfo); errDecode == nil && ipInfo.IP != "" {
+			c := ipInfo.City
+			if ipInfo.Region != "" && ipInfo.Region != ipInfo.City {
+				c = fmt.Sprintf("%s, %s", ipInfo.City, ipInfo.Region)
 			}
-			errDecode := json.NewDecoder(io.LimitReader(resp1.Body, 64*1024)).Decode(&ipInfo)
-			resp1.Body.Close()
-			if errDecode == nil && ipInfo.IP != "" {
-				c := ipInfo.City
-				if ipInfo.Region != "" && ipInfo.Region != ipInfo.City {
-					c = fmt.Sprintf("%s, %s", ipInfo.City, ipInfo.Region)
+			ch <- ipResult{ip: ipInfo.IP, isp: cleanISPName(ipInfo.Org), city: c, country: ipInfo.Country, hasGeo: true}
+		} else {
+			ch <- ipResult{err: fmt.Errorf("decode error")}
+		}
+	}()
+
+	// Provider 2: api.ipify.org (fastest public IP echo fallback)
+	go func() {
+		req, errReq := http.NewRequestWithContext(ctx, "GET", "https://api.ipify.org?format=json", nil)
+		if errReq != nil {
+			ch <- ipResult{err: errReq}
+			return
+		}
+		req.Header.Set("User-Agent", "KernelView-Go")
+		resp, err := client.Do(req)
+		if err != nil {
+			ch <- ipResult{err: err}
+			return
+		}
+		defer resp.Body.Close()
+		var ipifyResp struct {
+			IP string `json:"ip"`
+		}
+		if errDecode := json.NewDecoder(io.LimitReader(resp.Body, 8*1024)).Decode(&ipifyResp); errDecode == nil && ipifyResp.IP != "" {
+			ch <- ipResult{ip: ipifyResp.IP, isp: "Unknown ISP", city: "Unknown City", country: "Unknown Country", hasGeo: false}
+		} else {
+			ch <- ipResult{err: fmt.Errorf("decode error")}
+		}
+	}()
+
+	var fallbackResult *ipResult
+	for i := 0; i < 2; i++ {
+		select {
+		case res := <-ch:
+			if res.err == nil && res.ip != "" {
+				if res.hasGeo {
+					return res.ip, res.isp, res.city, res.country, nil
 				}
-				return ipInfo.IP, cleanISPName(ipInfo.Org), c, ipInfo.Country, nil
+				fallbackResult = &res
 			}
+		case <-ctx.Done():
+			if fallbackResult != nil {
+				return fallbackResult.ip, fallbackResult.isp, fallbackResult.city, fallbackResult.country, nil
+			}
+			return "", "", "", "", ctx.Err()
 		}
 	}
 
-	// Provider 2: ip-api.com (fallback)
-	req2, errReq2 := http.NewRequestWithContext(ctx, "GET", "https://ip-api.com/json/", nil)
-	if errReq2 == nil {
-		req2.Header.Set("User-Agent", "KernelView-Go")
-		if resp2, err2 := client.Do(req2); err2 == nil {
-			var apiResp ipAPIResponse
-			errDecode := json.NewDecoder(io.LimitReader(resp2.Body, 64*1024)).Decode(&apiResp)
-			resp2.Body.Close()
-			if errDecode == nil && apiResp.Status == "success" {
-				return apiResp.Query, apiResp.ISP, apiResp.City, apiResp.Country, nil
-			}
-		}
-	}
-
-	// Provider 3: api.ipify.org (minimal fallback)
-	req3, errReq3 := http.NewRequestWithContext(ctx, "GET", "https://api.ipify.org?format=json", nil)
-	if errReq3 == nil {
-		req3.Header.Set("User-Agent", "KernelView-Go")
-		if resp3, err3 := client.Do(req3); err3 == nil {
-			var ipifyResp struct {
-				IP string `json:"ip"`
-			}
-			errDecode := json.NewDecoder(io.LimitReader(resp3.Body, 16*1024)).Decode(&ipifyResp)
-			resp3.Body.Close()
-			if errDecode == nil && ipifyResp.IP != "" {
-				return ipifyResp.IP, "Unknown ISP", "Unknown City", "Unknown Country", nil
-			}
-		}
+	if fallbackResult != nil {
+		return fallbackResult.ip, fallbackResult.isp, fallbackResult.city, fallbackResult.country, nil
 	}
 
 	return "", "", "", "", fmt.Errorf("all public IP lookup endpoints failed")
@@ -2297,7 +2357,7 @@ func getSystemPingTime(host string) string {
 	if !reValidHost.MatchString(host) {
 		return "Failed"
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 350*time.Millisecond)
 	defer cancel()
 
 	var cmd *exec.Cmd
@@ -2374,68 +2434,45 @@ func GetSystemInfo(isFast bool) *SystemInfo {
 	info := &SystemInfo{}
 	var wg sync.WaitGroup
 
-	// --- Fast Group (Always Run) ---
-	wg.Add(3)
+	// --- Fast Core Tasks (Always Run) ---
+	wg.Add(14)
 	go gatherHostInfo(info, &wg)
 	go gatherCPUInfo(info, &wg, isFast)
 	go gatherMemoryInfo(info, &wg)
 
-	// --- Fast Standalone Tasks (Always Run) ---
-	fastTasks := map[string]*string{
-		"Shell": &info.Shell, "GPU": &info.GPU, "Disk": &info.Disk, "IPAddress": &info.IPAddress,
-		"Locale": &info.Locale, "Resolution": &info.Resolution, "WindowManager": &info.WindowManager,
-		"DE": &info.DE, "Terminal": &info.Terminal, "Go": &info.Go,
-		"Virtualization": &info.Virtualization,
-	}
-	fastTaskFuncs := map[string]func() string{
-		"Shell": getShell,
-		"GPU": func() string {
-			if runtime.GOOS == "linux" {
-				return getLinuxGPU()
-			}
-			return getGPUInfo()
-		},
-		"Disk": getDisk, "IPAddress": getIPAddress,
-		"Locale": getSystemLocale,
-		"Resolution": getResolution,
-		"WindowManager": func() string {
-			if runtime.GOOS == "linux" {
-				return getLinuxWM()
-			}
-			return getWindowManager()
-		},
-		"DE": getDesktopEnvironment, "Terminal": getTerminal, "Go": getGoVersion,
-		"Virtualization": getVirtualization,
-	}
-	for key, Ptr := range fastTasks {
-		wg.Add(1)
-		go func(p *string, f func() string) {
-			defer wg.Done()
-			*p = f()
-		}(Ptr, fastTaskFuncs[key])
-	}
+	go func() { defer wg.Done(); info.Shell = getShell() }()
+	go func() {
+		defer wg.Done()
+		if runtime.GOOS == "linux" {
+			info.GPU = getLinuxGPU()
+		} else {
+			info.GPU = getGPUInfo()
+		}
+	}()
+	go func() { defer wg.Done(); info.Disk = getDisk() }()
+	go func() { defer wg.Done(); info.IPAddress = getIPAddress() }()
+	go func() { defer wg.Done(); info.Locale = getSystemLocale() }()
+	go func() { defer wg.Done(); info.Resolution = getResolution() }()
+	go func() {
+		defer wg.Done()
+		if runtime.GOOS == "linux" {
+			info.WindowManager = getLinuxWM()
+		} else {
+			info.WindowManager = getWindowManager()
+		}
+	}()
+	go func() { defer wg.Done(); info.DE = getDesktopEnvironment() }()
+	go func() { defer wg.Done(); info.Terminal = getTerminal() }()
+	go func() { defer wg.Done(); info.Go = getGoVersion() }()
+	go func() { defer wg.Done(); info.Virtualization = getVirtualization() }()
 
-	// --- Conditional Slow Tasks (Only run if !isFast) ---
+	// --- Conditional Deep Tasks (Only run if !isFast) ---
 	if !isFast {
-		slowTasks := map[string]*string{
-			"OpenPorts":   &info.OpenPorts,
-			"Packages":    &info.Packages,
-			"Languages":   &info.Languages,
-			"Temperature": &info.Temperature,
-		}
-		slowTaskFuncs := map[string]func() string{
-			"OpenPorts":   getOpenPorts,
-			"Packages":    GetPackageCounts,
-			"Languages":   getInstalledLanguages,
-			"Temperature": getTemperatures,
-		}
-		for key, Ptr := range slowTasks {
-			wg.Add(1)
-			go func(p *string, f func() string) {
-				defer wg.Done()
-				*p = f()
-			}(Ptr, slowTaskFuncs[key])
-		}
+		wg.Add(4)
+		go func() { defer wg.Done(); info.OpenPorts = getOpenPorts() }()
+		go func() { defer wg.Done(); info.Packages = GetPackageCounts() }()
+		go func() { defer wg.Done(); info.Languages = getInstalledLanguages() }()
+		go func() { defer wg.Done(); info.Temperature = getTemperatures() }()
 	}
 
 	wg.Wait()
@@ -2449,20 +2486,36 @@ func GetProcessList() ([]ProcessInfo, error) {
 		return nil, fmt.Errorf("failed to get processes: %w", err)
 	}
 
+	validProcs := make([]*process.Process, 0, len(allProcs))
+	for _, p := range allProcs {
+		if p == nil || p.Pid <= 1 {
+			continue
+		}
+		name, err := p.Name()
+		if err != nil || name == "" {
+			continue
+		}
+		if runtime.GOOS == "linux" && (strings.HasPrefix(name, "[") || name == "systemd" || name == "init") {
+			continue
+		}
+		if name == "kernel_task" || name == "idle" {
+			continue
+		}
+		validProcs = append(validProcs, p)
+	}
+
 	numWorkers := 16
-	if len(allProcs) < numWorkers {
-		numWorkers = len(allProcs)
+	if len(validProcs) < numWorkers {
+		numWorkers = len(validProcs)
 	}
 	if numWorkers < 1 {
 		numWorkers = 1
 	}
 
-	// Step 1: Prime the CPU percent calculation by calling it once on all processes.
-	jobs1 := make(chan *process.Process, len(allProcs))
-	for _, p := range allProcs {
-		if p != nil {
-			jobs1 <- p
-		}
+	// Step 1: Prime the CPU percent calculation by calling it once on valid processes.
+	jobs1 := make(chan *process.Process, len(validProcs))
+	for _, p := range validProcs {
+		jobs1 <- p
 	}
 	close(jobs1)
 
@@ -2479,19 +2532,17 @@ func GetProcessList() ([]ProcessInfo, error) {
 	}
 	wg.Wait()
 
-	// Step 2: Sleep to allow CPU usage to accumulate.
-	time.Sleep(100 * time.Millisecond)
+	// Step 2: Sleep briefly to allow CPU delta measurement
+	time.Sleep(20 * time.Millisecond)
 
 	// Step 3: Call CPUPercent on the same instances to get the actual CPU usage.
-	jobs2 := make(chan *process.Process, len(allProcs))
-	for _, p := range allProcs {
-		if p != nil {
-			jobs2 <- p
-		}
+	jobs2 := make(chan *process.Process, len(validProcs))
+	for _, p := range validProcs {
+		jobs2 <- p
 	}
 	close(jobs2)
 
-	results := make(chan ProcessInfo, len(allProcs))
+	results := make(chan ProcessInfo, len(validProcs))
 	for i := 0; i < numWorkers; i++ {
 		wg.Add(1)
 		go func() {
@@ -2499,18 +2550,7 @@ func GetProcessList() ([]ProcessInfo, error) {
 			defer func() { _ = recover() }()
 			for proc := range jobs2 {
 				pid := proc.Pid
-				name, err := proc.Name()
-				if err != nil || name == "" || pid <= 1 {
-					continue
-				}
-
-				// Exclude common system/idle processes to keep the list clean
-				if runtime.GOOS == "linux" && (strings.HasPrefix(name, "[") || name == "systemd" || name == "init") {
-					continue
-				}
-				if name == "kernel_task" || name == "idle" {
-					continue
-				}
+				name, _ := proc.Name()
 
 				cpuPerc, err := proc.CPUPercent()
 				if err != nil {
@@ -2724,7 +2764,11 @@ func GetNetworkDetails() (*NetworkInfo, error) {
 				info.IPv6Address = detail.IPv6
 				info.MACAddress = detail.MAC
 				if detail.Type == "Wi-Fi" {
-					info.Wifi = getWifiDetails(iface.Name)
+					wg.Add(1)
+					go func(wName string) {
+						defer wg.Done()
+						info.Wifi = getWifiDetails(wName)
+					}(iface.Name)
 				}
 			}
 		}
@@ -4115,7 +4159,7 @@ func getWindowsGPUMetrics() (LiveGPUMetrics, error) {
 	metrics := LiveGPUMetrics{}
 
 	// 1. Try Windows typeperf for GPU 3D engine counters
-	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 350*time.Millisecond)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "typeperf", `\GPU Engine(*engtype_3D)\Utilization Percentage`, "-sc", "1")
@@ -4788,33 +4832,34 @@ func getBSDGPUDetails(details *GPUDetails) {
 func GetGPUDetails() *GPUDetails {
 	details := &GPUDetails{}
 
-	// 1. Resolve GPU Name
+	// 1. Concurrent Graphics Library Probing (OpenGL, Vulkan, OpenCL, CUDA)
+	var glWg sync.WaitGroup
+	var glVer, glRenderer, glCore, glES, glVram string
+	var glUnified bool
+	var vkVer, vkDriver string
+	var oclVer, cudaVer string
+
+	glWg.Add(3)
+	go func() {
+		defer glWg.Done()
+		glVer, glRenderer, glCore, glES, glVram, glUnified = getOpenGLDetails()
+	}()
+	go func() {
+		defer glWg.Done()
+		vkVer, vkDriver = getVulkanDetails("")
+	}()
+	go func() {
+		defer glWg.Done()
+		oclVer = getOpenCLDetails()
+		cudaVer = getCUDAVersion()
+	}()
+
+	// 2. Resolve GPU Name
 	if name := getLinuxGPU(); name != "" {
 		details.Name = name
 	} else if name := getGPUInfo(); name != "" && name != "Unknown" {
 		details.Name = name
 	}
-
-	// 2. Resolve Graphics Libraries
-	glVer, glRenderer, glCore, glES, glVram, glUnified := getOpenGLDetails()
-	details.OpenGL = glVer
-	details.OpenGLRenderer = glRenderer
-	details.OpenGLCore = glCore
-	details.OpenGLES = glES
-	if glVram != "" && details.VRAMTotal == "" {
-		details.VRAMTotal = glVram
-		if glUnified {
-			details.VRAMType = "Unified System Memory"
-		}
-	}
-
-	vendorHint := details.Vendor
-	if vendorHint == "" {
-		vendorHint = details.Name
-	}
-	details.Vulkan, details.VulkanDriver = getVulkanDetails(vendorHint)
-	details.OpenCL = getOpenCLDetails()
-	details.CUDA = getCUDAVersion()
 
 	// 3. Resolve Hardware, Vendor, Driver, VRAM, Clocks, Displays based on OS
 	if runtime.GOOS == "linux" {
@@ -5254,6 +5299,22 @@ func GetGPUDetails() *GPUDetails {
 			details.Vendor = "ARM"
 		}
 	}
+
+	glWg.Wait()
+	details.OpenGL = glVer
+	details.OpenGLRenderer = glRenderer
+	details.OpenGLCore = glCore
+	details.OpenGLES = glES
+	if glVram != "" && details.VRAMTotal == "" {
+		details.VRAMTotal = glVram
+		if glUnified {
+			details.VRAMType = "Unified System Memory"
+		}
+	}
+	details.Vulkan = vkVer
+	details.VulkanDriver = vkDriver
+	details.OpenCL = oclVer
+	details.CUDA = cudaVer
 
 	return details
 }
