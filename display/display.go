@@ -785,12 +785,10 @@ func DisplayLayout(logoKey string, infoLines []string, theme Theme) {
 		}
 
 		// Ensure it doesn't overflow the screen width
-		if logoWidth+3+utf8.RuneCountInString(stripAnsi(infoPart)) > termWidth {
+		if logoWidth+3+visualLen(infoPart) > termWidth {
 			allowedWidth := termWidth - logoWidth - 4
 			if allowedWidth > 10 {
-				// Strip ANSI first to avoid broken escapes, truncate, and re-wrap
-				clean := stripAnsi(infoPart)
-				infoPart = theme.Value + truncateString(clean, allowedWidth) + theme.Reset
+				infoPart = truncateAnsi(infoPart, allowedWidth)
 			}
 		}
 

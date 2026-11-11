@@ -2615,8 +2615,15 @@ func GetProcessList() ([]ProcessInfo, error) {
 
 	validProcs := make([]*process.Process, 0, len(allProcs))
 	for _, p := range allProcs {
-		if p == nil || p.Pid <= 1 {
+		if p == nil || p.Pid <= 2 {
 			continue
+		}
+		if runtime.GOOS == "linux" {
+			// Fast check: kernel worker threads have empty cmdline, skip overhead
+			cmdline, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", p.Pid))
+			if err != nil || len(cmdline) == 0 {
+				continue
+			}
 		}
 		name, err := p.Name()
 		if err != nil || name == "" {
@@ -5560,36 +5567,40 @@ func GetGPUDetails() *GPUDetails {
 }
 
 func getOpenGLDetails() (version, renderer, coreProfile, esProfile, vram string, unified bool) {
-	out := runCommand("glxinfo", "-B")
-	if out == "" {
-		out = runCommand("glxinfo")
-	}
-	if out != "" {
-		lines := strings.Split(out, "\n")
-		for _, line := range lines {
-			line = strings.TrimSpace(line)
-			if strings.HasPrefix(line, "OpenGL version string:") {
-				version = strings.TrimSpace(strings.TrimPrefix(line, "OpenGL version string:"))
-			} else if strings.HasPrefix(line, "OpenGL core profile version string:") {
-				coreProfile = strings.TrimSpace(strings.TrimPrefix(line, "OpenGL core profile version string:"))
-			} else if strings.HasPrefix(line, "OpenGL renderer string:") {
-				renderer = strings.TrimSpace(strings.TrimPrefix(line, "OpenGL renderer string:"))
-			} else if strings.HasPrefix(line, "OpenGL ES profile version string:") {
-				esProfile = strings.TrimSpace(strings.TrimPrefix(line, "OpenGL ES profile version string:"))
-			} else if strings.HasPrefix(line, "Video memory:") {
-				vram = strings.TrimSpace(strings.TrimPrefix(line, "Video memory:"))
-			} else if strings.HasPrefix(line, "Unified memory:") {
-				if strings.Contains(line, "yes") {
-					unified = true
+	if _, err := exec.LookPath("glxinfo"); err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 750*time.Millisecond)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "glxinfo", "-B")
+		if outBytes, err := cmd.Output(); err == nil && len(outBytes) > 0 {
+			lines := strings.Split(string(outBytes), "\n")
+			for _, line := range lines {
+				line = strings.TrimSpace(line)
+				if strings.HasPrefix(line, "OpenGL version string:") {
+					version = strings.TrimSpace(strings.TrimPrefix(line, "OpenGL version string:"))
+				} else if strings.HasPrefix(line, "OpenGL core profile version string:") {
+					coreProfile = strings.TrimSpace(strings.TrimPrefix(line, "OpenGL core profile version string:"))
+				} else if strings.HasPrefix(line, "OpenGL renderer string:") {
+					renderer = strings.TrimSpace(strings.TrimPrefix(line, "OpenGL renderer string:"))
+				} else if strings.HasPrefix(line, "OpenGL ES profile version string:") {
+					esProfile = strings.TrimSpace(strings.TrimPrefix(line, "OpenGL ES profile version string:"))
+				} else if strings.HasPrefix(line, "Video memory:") {
+					vram = strings.TrimSpace(strings.TrimPrefix(line, "Video memory:"))
+				} else if strings.HasPrefix(line, "Unified memory:") {
+					if strings.Contains(line, "yes") {
+						unified = true
+					}
 				}
 			}
+			return
 		}
 	}
 
-	if version == "" {
-		out = runCommand("eglinfo")
-		if out != "" {
-			for _, line := range strings.Split(out, "\n") {
+	if _, err := exec.LookPath("eglinfo"); err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "eglinfo")
+		if outBytes, err := cmd.Output(); err == nil {
+			for _, line := range strings.Split(string(outBytes), "\n") {
 				if strings.Contains(line, "EGL version string:") {
 					version = strings.TrimSpace(strings.TrimPrefix(line, "EGL version string:"))
 					break
@@ -5601,20 +5612,22 @@ func getOpenGLDetails() (version, renderer, coreProfile, esProfile, vram string,
 }
 
 func getVulkanDetails(vendorHint string) (version, driver string) {
-	out := runCommand("vulkaninfo", "--summary")
-	if out == "" {
-		out = runCommand("vulkaninfo")
-	}
-	if out != "" {
-		for _, line := range strings.Split(out, "\n") {
-			line = strings.TrimSpace(line)
-			if strings.HasPrefix(line, "Vulkan Instance Version:") {
-				version = strings.TrimSpace(strings.TrimPrefix(line, "Vulkan Instance Version:"))
-			} else if strings.HasPrefix(line, "driverName") {
-				parts := strings.Split(line, "=")
-				if len(parts) > 1 {
-					driver = strings.TrimSpace(parts[1])
+	if _, err := exec.LookPath("vulkaninfo"); err == nil {
+		out := runCommand("vulkaninfo", "--summary")
+		if out != "" {
+			for _, line := range strings.Split(out, "\n") {
+				line = strings.TrimSpace(line)
+				if strings.HasPrefix(line, "Vulkan Instance Version:") {
+					version = strings.TrimSpace(strings.TrimPrefix(line, "Vulkan Instance Version:"))
+				} else if strings.HasPrefix(line, "driverName") {
+					parts := strings.Split(line, "=")
+					if len(parts) > 1 {
+						driver = strings.TrimSpace(parts[1])
+					}
 				}
+			}
+			if version != "" {
+				return version, driver
 			}
 		}
 	}

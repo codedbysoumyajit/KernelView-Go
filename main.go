@@ -12,7 +12,7 @@ import (
 )
 
 // version is set at build time
-var version = "v1.4.0-nightly"
+var version = "v1.4.0"
 
 // handleJSONOutput handles all --json flag requests
 func handleJSONOutput(processFlag, networkFlag, gpuFlag, kernelFlag, fastFlag bool) {
@@ -113,7 +113,7 @@ func main() {
 		os.Exit(0)
 	}
 
-	// 2. Check for mutually exclusive modes
+	// 3. Check for mutually exclusive modes
 	modeCount := 0
 	if fastFlag {
 		modeCount++
@@ -137,7 +137,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 3. Handle JSON output
+	// 4. Handle JSON output
 	if jsonFlag {
 		handleJSONOutput(processFlag, networkFlag, gpuFlag, kernelFlag, fastFlag)
 		os.Exit(0)
@@ -158,8 +158,8 @@ func main() {
 		mode = "kernel"
 	}
 
-	// Select theme
-	if noColorFlag {
+	// Select theme (respects --no-color flag and NO_COLOR environment variable)
+	if noColorFlag || os.Getenv("NO_COLOR") != "" {
 		currentTheme = display.BlankTheme
 	} else if fastFlag {
 		currentTheme = display.FastTheme
