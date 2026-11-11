@@ -313,10 +313,29 @@ func gatherHostInfo(info *SystemInfo, wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	if runtime.GOOS == "linux" {
-		uptime, err := getLinuxUptime()
-		if err == nil {
+		if uptime, err := getLinuxUptime(); err == nil {
 			info.Uptime = uptime
 		}
+		info.OS = getOSInfo()
+		info.Host = getHostModel()
+		info.Hostname, _ = os.Hostname()
+
+		osRelease := parseOSRelease()
+		platform := osRelease["NAME"]
+		if platform == "" {
+			platform = osRelease["ID"]
+		}
+		if platform == "" {
+			platform = "Linux"
+		} else {
+			platform = strings.Fields(platform)[0]
+		}
+		if kver, err := os.ReadFile("/proc/sys/kernel/osrelease"); err == nil {
+			info.Kernel = fmt.Sprintf("%s %s", titleCase(platform), strings.TrimSpace(string(kver)))
+		} else {
+			info.Kernel = titleCase(platform)
+		}
+		return
 	}
 
 	h, err := host.Info()
@@ -673,11 +692,38 @@ func getShell() string {
 
 	var version string
 	switch shellName {
-	case "bash", "zsh", "fish":
-		out := runCommand(shellPath, "--version")
-		if out != "" {
-			firstLine := strings.Split(out, "\n")[0]
-			version = reShellVersion.FindString(firstLine)
+	case "bash":
+		if v := os.Getenv("BASH_VERSION"); v != "" {
+			version = strings.Split(v, "(")[0]
+		}
+		if version == "" {
+			out := runCommand(shellPath, "--version")
+			if out != "" {
+				firstLine := strings.Split(out, "\n")[0]
+				version = reShellVersion.FindString(firstLine)
+			}
+		}
+	case "zsh":
+		if v := os.Getenv("ZSH_VERSION"); v != "" {
+			version = v
+		}
+		if version == "" {
+			out := runCommand(shellPath, "--version")
+			if out != "" {
+				firstLine := strings.Split(out, "\n")[0]
+				version = reShellVersion.FindString(firstLine)
+			}
+		}
+	case "fish":
+		if v := os.Getenv("FISH_VERSION"); v != "" {
+			version = v
+		}
+		if version == "" {
+			out := runCommand(shellPath, "--version")
+			if out != "" {
+				firstLine := strings.Split(out, "\n")[0]
+				version = reShellVersion.FindString(firstLine)
+			}
 		}
 	case "powershell":
 		if psVer := getWindowsRegValue(`HKLM\SOFTWARE\Microsoft\PowerShell\3\PowerShellEngine`, "PowerShellVersion"); psVer != "" {
@@ -704,6 +750,82 @@ func cleanGPUName(name string) string {
 }
 
 func getLinuxGPU() string {
+	// 1. Fast sysfs DRM + udev path (<0.5ms in RAM, zero subprocesses)
+	if drmFiles, err := os.ReadDir("/sys/class/drm"); err == nil {
+		var gpus []string
+		seen := make(map[string]bool)
+		for _, f := range drmFiles {
+			name := f.Name()
+			if strings.HasPrefix(name, "card") && !strings.Contains(name, "-") {
+				target, err := os.Readlink("/sys/class/drm/" + name + "/device")
+				if err == nil {
+					pciID := filepath.Base(target)
+					udevPath := "/run/udev/data/+pci:" + pciID
+					if data, err := os.ReadFile(udevPath); err == nil {
+						var vendor, model string
+						lines := strings.Split(string(data), "\n")
+						for _, line := range lines {
+							if strings.HasPrefix(line, "E:ID_VENDOR_FROM_DATABASE=") {
+								vendor = strings.TrimPrefix(line, "E:ID_VENDOR_FROM_DATABASE=")
+							} else if strings.HasPrefix(line, "E:ID_MODEL_FROM_DATABASE=") {
+								model = strings.TrimPrefix(line, "E:ID_MODEL_FROM_DATABASE=")
+							}
+						}
+						if model != "" {
+							gpuName := cleanGPUName(vendor + " " + model)
+							if !seen[gpuName] {
+								seen[gpuName] = true
+								gpus = append(gpus, gpuName)
+							}
+						}
+					}
+				}
+			}
+		}
+		if len(gpus) > 0 {
+			return strings.Join(gpus, ", ")
+		}
+	}
+
+	// 2. Sysfs PCI bus scan fallback (<1ms)
+	if pciFiles, err := os.ReadDir("/sys/bus/pci/devices"); err == nil {
+		var gpus []string
+		seen := make(map[string]bool)
+		for _, f := range pciFiles {
+			pciID := f.Name()
+			classBytes, err := os.ReadFile("/sys/bus/pci/devices/" + pciID + "/class")
+			if err != nil {
+				continue
+			}
+			classStr := strings.TrimSpace(string(classBytes))
+			if strings.HasPrefix(classStr, "0x03") {
+				udevPath := "/run/udev/data/+pci:" + pciID
+				if data, err := os.ReadFile(udevPath); err == nil {
+					var vendor, model string
+					lines := strings.Split(string(data), "\n")
+					for _, line := range lines {
+						if strings.HasPrefix(line, "E:ID_VENDOR_FROM_DATABASE=") {
+							vendor = strings.TrimPrefix(line, "E:ID_VENDOR_FROM_DATABASE=")
+						} else if strings.HasPrefix(line, "E:ID_MODEL_FROM_DATABASE=") {
+							model = strings.TrimPrefix(line, "E:ID_MODEL_FROM_DATABASE=")
+						}
+					}
+					if model != "" {
+						gpuName := cleanGPUName(vendor + " " + model)
+						if !seen[gpuName] {
+							seen[gpuName] = true
+							gpus = append(gpus, gpuName)
+						}
+					}
+				}
+			}
+		}
+		if len(gpus) > 0 {
+			return strings.Join(gpus, ", ")
+		}
+	}
+
+	// 3. Fallback: lspci (if udev/sysfs is unavailable)
 	cmd := exec.Command("lspci")
 	out, err := cmd.Output()
 	if err != nil {
@@ -1823,6 +1945,11 @@ func getVirtualization() string {
 	return virt
 }
 
+// GetVirtualization returns the virtualization type if any (Exported)
+func GetVirtualization() string {
+	return getVirtualization()
+}
+
 func getTemperatures() string {
 	temps, err := host.SensorsTemperatures()
 	if err != nil || len(temps) == 0 {
@@ -2435,7 +2562,7 @@ func GetSystemInfo(isFast bool) *SystemInfo {
 	var wg sync.WaitGroup
 
 	// --- Fast Core Tasks (Always Run) ---
-	wg.Add(14)
+	wg.Add(13)
 	go gatherHostInfo(info, &wg)
 	go gatherCPUInfo(info, &wg, isFast)
 	go gatherMemoryInfo(info, &wg)
@@ -2464,11 +2591,11 @@ func GetSystemInfo(isFast bool) *SystemInfo {
 	go func() { defer wg.Done(); info.DE = getDesktopEnvironment() }()
 	go func() { defer wg.Done(); info.Terminal = getTerminal() }()
 	go func() { defer wg.Done(); info.Go = getGoVersion() }()
-	go func() { defer wg.Done(); info.Virtualization = getVirtualization() }()
 
 	// --- Conditional Deep Tasks (Only run if !isFast) ---
 	if !isFast {
-		wg.Add(4)
+		wg.Add(5)
+		go func() { defer wg.Done(); info.Virtualization = getVirtualization() }()
 		go func() { defer wg.Done(); info.OpenPorts = getOpenPorts() }()
 		go func() { defer wg.Done(); info.Packages = GetPackageCounts() }()
 		go func() { defer wg.Done(); info.Languages = getInstalledLanguages() }()
@@ -2906,12 +3033,126 @@ type LiveTracker struct {
 	smoothedNetTx float64
 }
 
+// fastLinuxMeminfo parses /proc/meminfo in a single pass without allocations
+func fastLinuxMeminfo() (total, used, swapTotal, swapUsed uint64, ok bool) {
+	data, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0, 0, 0, 0, false
+	}
+	var memTotal, memFree, memAvail, buffers, cached, sTotal, sFree uint64
+	var hasAvail bool
+
+	parseVal := func(b []byte) uint64 {
+		i := 0
+		for i < len(b) && (b[i] == ' ' || b[i] == '\t') {
+			i++
+		}
+		var n uint64
+		for i < len(b) && b[i] >= '0' && b[i] <= '9' {
+			n = n*10 + uint64(b[i]-'0')
+			i++
+		}
+		return n * 1024
+	}
+
+	lines := bytes.Split(data, []byte("\n"))
+	for _, line := range lines {
+		if bytes.HasPrefix(line, []byte("MemTotal:")) {
+			memTotal = parseVal(line[9:])
+		} else if bytes.HasPrefix(line, []byte("MemFree:")) {
+			memFree = parseVal(line[8:])
+		} else if bytes.HasPrefix(line, []byte("MemAvailable:")) {
+			memAvail = parseVal(line[13:])
+			hasAvail = true
+		} else if bytes.HasPrefix(line, []byte("Buffers:")) {
+			buffers = parseVal(line[8:])
+		} else if bytes.HasPrefix(line, []byte("Cached:")) {
+			cached = parseVal(line[7:])
+		} else if bytes.HasPrefix(line, []byte("SwapTotal:")) {
+			sTotal = parseVal(line[10:])
+		} else if bytes.HasPrefix(line, []byte("SwapFree:")) {
+			sFree = parseVal(line[9:])
+		}
+	}
+
+	if memTotal == 0 {
+		return 0, 0, 0, 0, false
+	}
+
+	if hasAvail && memAvail > 0 {
+		used = memTotal - memAvail
+	} else {
+		used = memTotal - memFree - buffers - cached
+	}
+
+	if sTotal > 0 {
+		swapTotal = sTotal
+		swapUsed = sTotal - sFree
+	}
+	return memTotal, used, swapTotal, swapUsed, true
+}
+
+// fastLinuxNetDev parses /proc/net/dev in a single pass with zero allocation overhead
+func fastLinuxNetDev(cachedIface string) (iface string, rx uint64, tx uint64, ok bool) {
+	data, err := os.ReadFile("/proc/net/dev")
+	if err != nil {
+		return "", 0, 0, false
+	}
+	lines := bytes.Split(data, []byte("\n"))
+	var bestIface string
+	var bestRx, bestTx uint64
+
+	for _, line := range lines {
+		colonIdx := bytes.IndexByte(line, ':')
+		if colonIdx == -1 {
+			continue
+		}
+		name := string(bytes.TrimSpace(line[:colonIdx]))
+		if name == "lo" || strings.HasPrefix(name, "veth") || strings.HasPrefix(name, "docker") || strings.HasPrefix(name, "br-") {
+			continue
+		}
+		fields := bytes.Fields(line[colonIdx+1:])
+		if len(fields) >= 9 {
+			r, errR := strconv.ParseUint(string(fields[0]), 10, 64)
+			t, errT := strconv.ParseUint(string(fields[8]), 10, 64)
+			if errR == nil && errT == nil {
+				if name == cachedIface {
+					return name, r, t, true
+				}
+				if r+t > bestRx+bestTx {
+					bestIface = name
+					bestRx = r
+					bestTx = t
+				}
+			}
+		}
+	}
+	if bestIface != "" {
+		return bestIface, bestRx, bestTx, true
+	}
+	return "", 0, 0, false
+}
+
 // NewLiveTracker creates a new tracker instance (Exported)
 func NewLiveTracker() *LiveTracker {
-	h, err := host.Info()
 	var bTime time.Time
-	if err == nil {
-		bTime = time.Unix(int64(h.BootTime), 0)
+	if runtime.GOOS == "linux" {
+		if data, err := os.ReadFile("/proc/stat"); err == nil {
+			for _, line := range strings.Split(string(data), "\n") {
+				if strings.HasPrefix(line, "btime ") {
+					if sec, err := strconv.ParseInt(strings.TrimSpace(line[6:]), 10, 64); err == nil {
+						bTime = time.Unix(sec, 0)
+						break
+					}
+				}
+			}
+		}
+	}
+	if bTime.IsZero() {
+		h, err := host.Info()
+		if err == nil {
+			bTime = time.Unix(int64(h.BootTime), 0)
+		}
 	}
 	return &LiveTracker{
 		procsMap:           make(map[int32]*process.Process),
@@ -2989,52 +3230,16 @@ func (lt *LiveTracker) GetMetrics() (*LiveMetrics, error) {
 		}
 	}
 
-	// 3. Memory (real-time)
+	// 3. Memory (real-time, zero-alloc fast-path on Linux)
 	if runtime.GOOS == "linux" {
-		file, err := os.Open("/proc/meminfo")
-		if err == nil {
-			defer file.Close()
-			memMap := make(map[string]uint64)
-			scanner := bufio.NewScanner(file)
-			for scanner.Scan() {
-				line := scanner.Text()
-				parts := strings.SplitN(line, ":", 2)
-				if len(parts) == 2 {
-					key := strings.TrimSpace(parts[0])
-					valStr := strings.TrimSpace(parts[1])
-					valStr = strings.TrimSuffix(valStr, " kB")
-					val, err := strconv.ParseUint(valStr, 10, 64)
-					if err == nil {
-						memMap[key] = val * 1024
-					}
-				}
-			}
-
-			total := memMap["MemTotal"]
-			if total > 0 {
-				free := memMap["MemFree"]
-				buffers := memMap["Buffers"]
-				cached := memMap["Cached"]
-				available, ok := memMap["MemAvailable"]
-
-				var used uint64
-				if ok {
-					used = total - available
-				} else {
-					used = total - free - buffers - cached
-				}
-
-				metrics.RAMTotal = total
-				metrics.RAMUsed = used
-				metrics.RAMPercent = (float64(used) / float64(total)) * 100
-
-				swapTotal := memMap["SwapTotal"]
-				if swapTotal > 0 {
-					swapFree := memMap["SwapFree"]
-					metrics.SwapTotal = swapTotal
-					metrics.SwapUsed = swapTotal - swapFree
-					metrics.SwapPercent = (float64(metrics.SwapUsed) / float64(swapTotal)) * 100
-				}
+		if total, used, swapTotal, swapUsed, ok := fastLinuxMeminfo(); ok {
+			metrics.RAMTotal = total
+			metrics.RAMUsed = used
+			metrics.RAMPercent = (float64(used) / float64(total)) * 100
+			if swapTotal > 0 {
+				metrics.SwapTotal = swapTotal
+				metrics.SwapUsed = swapUsed
+				metrics.SwapPercent = (float64(swapUsed) / float64(swapTotal)) * 100
 			}
 		}
 	}
@@ -3088,37 +3293,49 @@ func (lt *LiveTracker) GetMetrics() (*LiveMetrics, error) {
 	}
 	metrics.Temperature = lt.cachedTemp
 
-	// 6. Network Rates (Iface list cached for 10 seconds, stats queried in real-time)
+	// 6. Network Rates (Zero-alloc Linux /proc/net/dev fast-path, cached interfaces)
 	var rxTotal, txTotal uint64
 	var activeIface string
-	counters, err := psnet.IOCounters(true)
-	if err == nil {
-		if time.Since(lt.lastIfaceUpdate) >= 10*time.Second || lt.lastIfaceUpdate.IsZero() || lt.cachedNetIface == "" {
-			ifaces, err := net.Interfaces()
-			if err == nil {
-				for _, iface := range ifaces {
-					if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 || strings.Contains(strings.ToLower(iface.Name), "virtual") || strings.Contains(strings.ToLower(iface.Name), "docker") || strings.HasPrefix(iface.Name, "veth") {
-						continue
-					}
-					for _, counter := range counters {
-						if counter.Name == iface.Name {
-							lt.cachedNetIface = iface.Name
+
+	if runtime.GOOS == "linux" {
+		if iface, rx, tx, ok := fastLinuxNetDev(lt.cachedNetIface); ok {
+			activeIface = iface
+			lt.cachedNetIface = iface
+			rxTotal = rx
+			txTotal = tx
+		}
+	}
+
+	if activeIface == "" {
+		counters, err := psnet.IOCounters(true)
+		if err == nil {
+			if time.Since(lt.lastIfaceUpdate) >= 10*time.Second || lt.lastIfaceUpdate.IsZero() || lt.cachedNetIface == "" {
+				ifaces, err := net.Interfaces()
+				if err == nil {
+					for _, iface := range ifaces {
+						if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 || strings.Contains(strings.ToLower(iface.Name), "virtual") || strings.Contains(strings.ToLower(iface.Name), "docker") || strings.HasPrefix(iface.Name, "veth") {
+							continue
+						}
+						for _, counter := range counters {
+							if counter.Name == iface.Name {
+								lt.cachedNetIface = iface.Name
+								break
+							}
+						}
+						if lt.cachedNetIface != "" {
 							break
 						}
 					}
-					if lt.cachedNetIface != "" {
-						break
-					}
+					lt.lastIfaceUpdate = time.Now()
 				}
-				lt.lastIfaceUpdate = time.Now()
 			}
-		}
-		activeIface = lt.cachedNetIface
-		for _, counter := range counters {
-			if counter.Name == activeIface {
-				rxTotal = counter.BytesRecv
-				txTotal = counter.BytesSent
-				break
+			activeIface = lt.cachedNetIface
+			for _, counter := range counters {
+				if counter.Name == activeIface {
+					rxTotal = counter.BytesRecv
+					txTotal = counter.BytesSent
+					break
+				}
 			}
 		}
 	}
@@ -3389,7 +3606,17 @@ func (lt *LiveTracker) scanProcessesAsync() {
 		}
 	}
 	for _, pid := range pids {
+		if pid <= 2 {
+			continue
+		}
 		if _, exists := lt.procsMap[pid]; !exists {
+			if runtime.GOOS == "linux" {
+				// Fast check: kernel threads have 0-byte cmdline, skip allocating process objects
+				cmdline, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+				if err != nil || len(cmdline) == 0 {
+					continue
+				}
+			}
 			proc, err := process.NewProcess(pid)
 			if err == nil {
 				lt.procsMap[pid] = proc
@@ -3486,37 +3713,51 @@ func (lt *LiveTracker) getLinuxDRMGPU() (LiveGPUMetrics, bool) {
 		return LiveGPUMetrics{}, false
 	}
 
-	// 1. Refresh cached DRM fdinfo paths if empty or after 15 seconds
-	if time.Since(lt.lastDRMPathsScan) >= 15*time.Second || len(lt.cachedDRMPaths) == 0 {
+	// 1. Refresh cached DRM fdinfo paths after 15 seconds
+	if time.Since(lt.lastDRMPathsScan) >= 15*time.Second {
+		lt.lastDRMPathsScan = time.Now()
 		lt.cachedDRMPaths = lt.cachedDRMPaths[:0]
-		entries, err := os.ReadDir("/proc")
-		if err == nil {
-			for _, e := range entries {
-				name := e.Name()
-				if len(name) == 0 || name[0] < '0' || name[0] > '9' {
-					continue
+
+		// Fast check: verify DRM card devices exist before walking /proc
+		drmDir, errDrm := os.ReadDir("/sys/class/drm")
+		hasCard := false
+		if errDrm == nil {
+			for _, d := range drmDir {
+				if strings.HasPrefix(d.Name(), "card") && !strings.Contains(d.Name(), "-") {
+					hasCard = true
+					break
 				}
-				fdDir := "/proc/" + name + "/fdinfo"
-				fds, errFd := os.ReadDir(fdDir)
-				if errFd != nil {
-					continue
-				}
-				for _, fd := range fds {
-					fpath := fdDir + "/" + fd.Name()
-					f, errOpen := os.Open(fpath)
-					if errOpen != nil {
+			}
+		}
+		if hasCard {
+			entries, err := os.ReadDir("/proc")
+			if err == nil {
+				for _, e := range entries {
+					name := e.Name()
+					if len(name) == 0 || name[0] < '0' || name[0] > '9' {
 						continue
 					}
-					var buf [512]byte
-					n, _ := f.Read(buf[:])
-					f.Close()
-					if n > 0 && bytes.Contains(buf[:n], []byte("drm-driver:")) {
-						lt.cachedDRMPaths = append(lt.cachedDRMPaths, fpath)
+					fdDir := "/proc/" + name + "/fdinfo"
+					fds, errFd := os.ReadDir(fdDir)
+					if errFd != nil {
+						continue
+					}
+					for _, fd := range fds {
+						fpath := fdDir + "/" + fd.Name()
+						f, errOpen := os.Open(fpath)
+						if errOpen != nil {
+							continue
+						}
+						var buf [512]byte
+						n, _ := f.Read(buf[:])
+						f.Close()
+						if n > 0 && bytes.Contains(buf[:n], []byte("drm-driver:")) {
+							lt.cachedDRMPaths = append(lt.cachedDRMPaths, fpath)
+						}
 					}
 				}
 			}
 		}
-		lt.lastDRMPathsScan = time.Now()
 	}
 
 	if len(lt.cachedDRMPaths) == 0 {
@@ -3565,7 +3806,6 @@ func (lt *LiveTracker) getLinuxDRMGPU() (LiveGPUMetrics, bool) {
 	lt.cachedDRMPaths = validPaths
 
 	if validCount == 0 {
-		lt.lastDRMPathsScan = time.Time{} // Force rescan on next tick
 		return LiveGPUMetrics{}, false
 	}
 

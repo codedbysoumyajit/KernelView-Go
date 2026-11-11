@@ -9,6 +9,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"KernelView-Go/gather"
 	"golang.org/x/term"
@@ -20,6 +21,7 @@ const (
 	Tick EventType = iota
 	Key
 	PackageUpdate
+	VirtUpdate
 )
 
 type Event struct {
@@ -40,6 +42,7 @@ type LiveDisplay struct {
 	peakDiskRead  float64
 	peakDiskWrite float64
 	renderBuf     bytes.Buffer
+	needClear     bool
 }
 
 // StartLiveDashboard launches the clean, aesthetic live dashboard
@@ -92,7 +95,7 @@ func StartLiveDashboard(isFast bool) {
 	staticInfo := gather.GetSystemInfo(true)
 	staticInfo.Packages = "Loading..."
 
-	// Background package count resolver (completely thread-safe via event loop)
+	// Background package count resolver (thread-safe via event loop)
 	go func() {
 		defer func() { _ = recover() }()
 		pkgs := gather.GetPackageCounts()
@@ -101,21 +104,45 @@ func StartLiveDashboard(isFast bool) {
 		}
 	}()
 
-	// Input reader
+	// Background virtualization resolver
 	go func() {
 		defer func() { _ = recover() }()
-		var buf [1]byte
+		virt := gather.GetVirtualization()
+		if virt != "" {
+			events <- Event{Type: VirtUpdate, Str: virt}
+		}
+	}()
+
+	// Input reader with ANSI escape sequence support (arrows, tab, shift-tab)
+	go func() {
+		defer func() { _ = recover() }()
+		var buf [16]byte
 		for {
 			n, err := os.Stdin.Read(buf[:])
 			if err != nil || n == 0 {
 				return
 			}
-			events <- Event{Type: Key, Char: buf[0]}
+			if n == 1 {
+				events <- Event{Type: Key, Char: buf[0]}
+			} else if n == 3 && buf[0] == 0x1b && buf[1] == '[' {
+				switch buf[2] {
+				case 'C': // Right arrow
+					events <- Event{Type: Key, Str: "right"}
+				case 'D': // Left arrow
+					events <- Event{Type: Key, Str: "left"}
+				case 'Z': // Shift-Tab
+					events <- Event{Type: Key, Str: "prev_tab"}
+				}
+			}
 		}
 	}()
 
-	// Live ticker (350ms with anti-jitter damping)
-	ticker := time.NewTicker(350 * time.Millisecond)
+	// Live ticker (adaptive: 200ms in fast mode, 350ms standard with anti-jitter damping)
+	tickInterval := 350 * time.Millisecond
+	if isFast {
+		tickInterval = 200 * time.Millisecond
+	}
+	ticker := time.NewTicker(tickInterval)
 	defer ticker.Stop()
 	done := make(chan struct{})
 	defer close(done)
@@ -133,41 +160,80 @@ func StartLiveDashboard(isFast bool) {
 	}()
 
 	ld := &LiveDisplay{
-		tracker: tracker,
-		static:  staticInfo,
-		isFast:  isFast,
-		tab:     "dashboard",
+		tracker:   tracker,
+		static:    staticInfo,
+		isFast:    isFast,
+		tab:       "dashboard",
+		needClear: true,
 	}
 
 	ld.updateSize()
 	ld.render()
 
+	tabOrder := []string{"dashboard", "processes", "network", "cores", "disk"}
+
 	for ev := range events {
 		switch ev.Type {
 		case Key:
 			char := ev.Char
-			if char == 'q' || char == 'Q' || char == 3 { // 3 = Ctrl+C
+			str := ev.Str
+
+			if char == 'q' || char == 'Q' || char == 3 || char == 0x1b { // 3 = Ctrl+C, 0x1b = Esc
 				return
 			}
-			switch char {
-			case '1', 'd', 'D':
-				ld.tab = "dashboard"
-				fmt.Print("\033[H\033[2J")
-			case '2', 'p', 'P':
-				ld.tab = "processes"
-				fmt.Print("\033[H\033[2J")
-			case '3', 'n', 'N':
-				ld.tab = "network"
-				fmt.Print("\033[H\033[2J")
-			case '4', 'c', 'C':
-				ld.tab = "cores"
-				fmt.Print("\033[H\033[2J")
-			case '5', 'i', 'I', 'k', 'K':
-				ld.tab = "disk"
-				fmt.Print("\033[H\033[2J")
+
+			currentIdx := 0
+			for i, t := range tabOrder {
+				if t == ld.tab {
+					currentIdx = i
+					break
+				}
+			}
+
+			tabChanged := false
+			if char == '\t' || str == "right" || char == 'l' || char == 'L' {
+				ld.tab = tabOrder[(currentIdx+1)%len(tabOrder)]
+				tabChanged = true
+			} else if str == "left" || str == "prev_tab" || char == 'h' || char == 'H' {
+				ld.tab = tabOrder[(currentIdx-1+len(tabOrder))%len(tabOrder)]
+				tabChanged = true
+			} else {
+				switch char {
+				case '1', 'd', 'D':
+					if ld.tab != "dashboard" {
+						ld.tab = "dashboard"
+						tabChanged = true
+					}
+				case '2', 'p', 'P':
+					if ld.tab != "processes" {
+						ld.tab = "processes"
+						tabChanged = true
+					}
+				case '3', 'n', 'N':
+					if ld.tab != "network" {
+						ld.tab = "network"
+						tabChanged = true
+					}
+				case '4', 'c', 'C':
+					if ld.tab != "cores" {
+						ld.tab = "cores"
+						tabChanged = true
+					}
+				case '5', 'i', 'I', 'k', 'K':
+					if ld.tab != "disk" {
+						ld.tab = "disk"
+						tabChanged = true
+					}
+				}
+			}
+
+			if tabChanged {
+				ld.needClear = true
 			}
 		case PackageUpdate:
 			ld.static.Packages = ev.Str
+		case VirtUpdate:
+			ld.static.Virtualization = ev.Str
 		}
 
 		ld.updateSize()
@@ -181,7 +247,7 @@ func (ld *LiveDisplay) updateSize() {
 		if w != ld.termWidth || h != ld.termHeight {
 			ld.termWidth = w
 			ld.termHeight = h
-			fmt.Print("\033[H\033[2J") // Clear on resize
+			ld.needClear = true
 		}
 	} else {
 		if ld.termWidth == 0 {
@@ -232,7 +298,13 @@ func (ld *LiveDisplay) renderWarningScreen(theme Theme) {
 	}
 
 	ld.renderBuf.Reset()
-	ld.renderBuf.WriteString("\033[?2026h\033[H")
+	ld.renderBuf.WriteString("\033[?2026h")
+	if ld.needClear {
+		ld.renderBuf.WriteString("\033[2J\033[H")
+		ld.needClear = false
+	} else {
+		ld.renderBuf.WriteString("\033[H")
+	}
 	for i, row := range allRows {
 		if i > 0 {
 			ld.renderBuf.WriteString("\r\n")
@@ -309,7 +381,13 @@ func (ld *LiveDisplay) render() {
 	}
 
 	ld.renderBuf.Reset()
-	ld.renderBuf.WriteString("\033[?2026h\033[H")
+	ld.renderBuf.WriteString("\033[?2026h")
+	if ld.needClear {
+		ld.renderBuf.WriteString("\033[2J\033[H")
+		ld.needClear = false
+	} else {
+		ld.renderBuf.WriteString("\033[H")
+	}
 	for i, row := range allRows {
 		if i > 0 {
 			ld.renderBuf.WriteString("\r\n")
@@ -419,21 +497,23 @@ func (ld *LiveDisplay) getFooterRows(theme Theme, withLeadingBlank bool) []strin
 	w := ld.termWidth
 
 	keyQ := fmt.Sprintf("%s\033[1;7m Q \033[0m", theme.Accent)
-	key1 := fmt.Sprintf("%s\033[1;7m 1 \033[0m", theme.Accent)
-	key2 := fmt.Sprintf("%s\033[1;7m 2 \033[0m", theme.Accent)
-	key3 := fmt.Sprintf("%s\033[1;7m 3 \033[0m", theme.Accent)
-	key4 := fmt.Sprintf("%s\033[1;7m 4 \033[0m", theme.Accent)
-	key5 := fmt.Sprintf("%s\033[1;7m 5 \033[0m", theme.Accent)
+	keyTab := fmt.Sprintf("%s\033[1;7m Tab \033[0m", theme.Accent)
+	key1 := fmt.Sprintf("%s\033[1;7m 1-5 \033[0m", theme.Accent)
+
+	refreshRate := "350ms"
+	if ld.isFast {
+		refreshRate = "200ms"
+	}
 
 	var leftPart, rightPart string
-	if w >= 105 {
-		leftPart = fmt.Sprintf(" %s Quit   %s Dashboard   %s Processes   %s Network   %s Cores   %s Disk/IO", keyQ, key1, key2, key3, key4, key5)
-		rightPart = "\033[90mRefresh: 350ms │ KernelView \033[0m"
-	} else if w >= 80 {
-		leftPart = fmt.Sprintf(" %s Quit  %s Dash  %s Procs  %s Net  %s Cores  %s Disk", keyQ, key1, key2, key3, key4, key5)
+	if w >= 95 {
+		leftPart = fmt.Sprintf(" %s Quit   %s Next Tab (or ←/→/h/l)   %s Direct Tab", keyQ, keyTab, key1)
+		rightPart = fmt.Sprintf("\033[90mRefresh: %s │ KernelView \033[0m", refreshRate)
+	} else if w >= 70 {
+		leftPart = fmt.Sprintf(" %s Quit  %s Tab (←/→)  %s Direct", keyQ, keyTab, key1)
 		rightPart = "\033[90mKernelView \033[0m"
 	} else {
-		leftPart = fmt.Sprintf(" %s Quit  %s-%s Tabs", keyQ, key1, key5)
+		leftPart = fmt.Sprintf(" %s Quit  %s Tab", keyQ, keyTab)
 		rightPart = ""
 	}
 
@@ -1176,10 +1256,25 @@ func runeCellWidth(r rune) int {
 }
 
 func visualLen(s string) int {
-	stripped := stripAnsi(s)
 	width := 0
-	for _, r := range stripped {
+	inEscape := false
+	for i := 0; i < len(s); {
+		b := s[i]
+		if b == 0x1b { // ESC
+			inEscape = true
+			i++
+			continue
+		}
+		if inEscape {
+			if (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') {
+				inEscape = false
+			}
+			i++
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
 		width += runeCellWidth(r)
+		i += size
 	}
 	return width
 }
@@ -1193,29 +1288,33 @@ func truncateAnsi(s string, maxVisualLen int) string {
 	}
 
 	var sb strings.Builder
+	sb.Grow(len(s) + 8)
 	currentLen := 0
 	inEscape := false
 
-	runes := []rune(s)
-	for i := 0; i < len(runes); i++ {
-		r := runes[i]
-		if r == 0x1b { // ESC
+	for i := 0; i < len(s); {
+		b := s[i]
+		if b == 0x1b { // ESC
 			inEscape = true
-			sb.WriteRune(r)
+			sb.WriteByte(b)
+			i++
 			continue
 		}
 		if inEscape {
-			sb.WriteRune(r)
-			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+			sb.WriteByte(b)
+			if (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') {
 				inEscape = false
 			}
+			i++
 			continue
 		}
 
+		r, size := utf8.DecodeRuneInString(s[i:])
 		w := runeCellWidth(r)
 		if currentLen+w <= maxVisualLen {
-			sb.WriteRune(r)
+			sb.WriteString(s[i : i+size])
 			currentLen += w
+			i += size
 		} else {
 			break
 		}
@@ -1341,7 +1440,7 @@ func printSideBySide(left []string, right []string, spacing int) []string {
 
 func formatKeyVal(key string, val string, width int, theme Theme) string {
 	keyPart := fmt.Sprintf("%s%-16s%s\033[90m:%s", theme.Key, key, theme.Reset, theme.Reset)
-	vLenKey := visualLen(keyPart)
+	const vLenKey = 17
 	rem := width - vLenKey - 1
 	if rem < 4 {
 		rem = 4
