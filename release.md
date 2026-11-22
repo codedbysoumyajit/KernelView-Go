@@ -55,19 +55,29 @@ Every single flag and collection pipeline has been rigorously profiled and optim
 
 ---
 
-### 3. 🖥️ Revamped Real-Time TUI Dashboard (`-l` / `--live`)
+### 3. 🖥️ Revamped Real-Time TUI Dashboard (`-l` / `--live`) & New `[6] LOGS` Stream
 
 The interactive terminal dashboard has been engineered for maximum responsiveness, fluid ergonomics, and near-zero CPU footprint:
 
+* **Brand New `[6] LOGS` Tab**: Real-time system log stream with intelligent multi-OS collectors:
+  * **Linux**: Zero-overhead `/var/log/syslog` & `/var/log/messages` fast-paths, sub-300ms non-root user journal streaming (`journalctl --user`), fast boot-scoped system journal (`journalctl -b`), and `dmesg -T` fallback.
+  * **macOS (Darwin)**: Direct `/var/log/system.log` tailing and compact unified logging (`log show --style compact`).
+  * **Windows**: Native Event Log querying via `wevtutil qe System` with automated block parsing, falling back to PowerShell pipeline streaming.
+  * **BSD / Unix**: Direct `/var/log/messages` inspection and kernel ring buffer (`dmesg`).
+* **Interactive Log Severity Filter & History Scrolling**:
+  * Tap `f` / `F` to cycle severity filter: `ALL` → `ERR` → `WARN+ERR` → `INFO` → `ALL`.
+  * Use `↑` / `↓` Arrow Keys or `k` / `j` Vim Keys to scroll backwards/forwards through buffered log history (`g` / `G` for top/bottom).
+  * Color-coded badges for `[INFO]`, `[WARN]`, `[ERR ]`, and `[DBUG]`.
 * **Zero-Allocation Rendering Engine**: Replaced regex-based string measurement with a single-pass UTF-8 scanner in `visualLen` and `truncateAnsi`, achieving **~60x faster text layout** with zero heap allocations per frame.
 * **100% Flicker-Free Tab Switching**: Integrated synchronized terminal update buffering (`\033[?2026h\033[2J\033[H` ... `\033[?2026l`) to eliminate screen flash and tearing during view transitions.
 * **Modern Keyboard Navigation**:
   * `Tab` / `Shift+Tab`: Cycle through tabs forward and backward.
   * `←` / `→` Arrow Keys & `h` / `l` Vim Keys: Smooth directional tab switching.
-  * `1`–`5` / `d`, `p`, `n`, `c`, `i`: Direct tab hotkeys.
+  * `1`–`6` / `d`, `p`, `n`, `c`, `i`, `s` / `o`: Direct tab hotkeys.
+  * `f`: Cycle log filter (on Logs tab).
+  * `k` / `j`: Scroll up / down (on Logs tab).
   * `q` / `Q` / `Esc` / `Ctrl+C`: Clean terminal restoration and exit.
-* **Zero-Alloc Linux Telemetry**: Single-pass zero-allocation parsing for `/proc/meminfo` and `/proc/net/dev`, saving over 150 heap allocations per tick.
-* **Fixed GPU DRM CPU Spike**: Fixed an issue where systems without active DRM processes would continuously scan all `/proc/*/fdinfo` file descriptors on every tick.
+* **Smart On-Demand Background Scanning**: System logs are collected asynchronously in the background and only actively polled when the Logs tab is open, keeping CPU utilization `<1.0%` during normal dashboard operation.
 * **Adaptive Fast Live Mode**: Combine `-l` with `-f` (`kernelview -l -f`) to enable an adaptive, ultra-responsive 200ms telemetry loop (default: 350ms with anti-jitter damping).
 
 ---

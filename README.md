@@ -59,14 +59,17 @@
 * **Fluid Keyboard Controls**:
   * `Tab` / `Shift+Tab`: Cycle through tabs forward and backward.
   * `←` / `→` Arrows or `h` / `l` Vim Keys: Smooth directional tab switching.
-  * `1`–`5` / `d`, `p`, `n`, `c`, `i`: Direct tab hotkeys.
+  * `1`–`6` / `d`, `p`, `n`, `c`, `i`, `s` / `o`: Direct tab hotkeys.
+  * `f` / `F`: Cycle log severity filter (`ALL` → `ERR` → `WARN+ERR` → `INFO` → `ALL`).
+  * `↑` / `↓` Arrows or `k` / `j` Vim Keys: Scroll through log history (`g` / `G` for top/bottom).
   * `q` / `Q` / `Esc` / `Ctrl+C`: Clean exit and terminal restoration.
-* **Five Dedicated Views**:
+* **Six Dedicated Views**:
   * `[1] Dashboard`: System summary, CPU/RAM usage meters, active network throughput, and top processes.
   * `[2] Processes`: Live process monitor sorted dynamically by CPU and memory consumption.
   * `[3] Network`: Bandwidth rates (upload/download), active interfaces, state, and lifetime totals.
   * `[4] CPU Cores`: Dedicated multi-column per-core frequency and load grid with temperature meters.
   * `[5] Disk / IO`: Mounted partition utilization, per-disk read/write speeds, and IOPS tracking.
+  * `[6] Logs`: Live system logs stream with auto-detection across Linux (`journalctl` / `syslog`), macOS (`log show` / `system.log`), Windows (`Event Log` / `wevtutil`), and BSD (`/var/log/messages`), complete with color-coded severity badges (`[INFO]`, `[WARN]`, `[ERR ]`, `[DBUG]`), interactive severity filtering, and scrollable log history.
 * **Adaptive Fast Mode**: Combine `-l` with `-f` (`kernelview -l -f`) for an ultra-responsive 200ms telemetry cycle.
 
 ### ⚡ Sub-Millisecond Architecture

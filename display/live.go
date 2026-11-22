@@ -43,6 +43,8 @@ type LiveDisplay struct {
 	peakDiskWrite float64
 	renderBuf     bytes.Buffer
 	needClear     bool
+	logOffset     int
+	logFilter     string
 }
 
 // StartLiveDashboard launches the clean, aesthetic live dashboard
@@ -126,12 +128,20 @@ func StartLiveDashboard(isFast bool) {
 				events <- Event{Type: Key, Char: buf[0]}
 			} else if n == 3 && buf[0] == 0x1b && buf[1] == '[' {
 				switch buf[2] {
+				case 'A': // Up arrow
+					events <- Event{Type: Key, Str: "up"}
+				case 'B': // Down arrow
+					events <- Event{Type: Key, Str: "down"}
 				case 'C': // Right arrow
 					events <- Event{Type: Key, Str: "right"}
 				case 'D': // Left arrow
 					events <- Event{Type: Key, Str: "left"}
 				case 'Z': // Shift-Tab
 					events <- Event{Type: Key, Str: "prev_tab"}
+				case 'H': // Home
+					events <- Event{Type: Key, Str: "home"}
+				case 'F': // End
+					events <- Event{Type: Key, Str: "end"}
 				}
 			}
 		}
@@ -165,12 +175,13 @@ func StartLiveDashboard(isFast bool) {
 		isFast:    isFast,
 		tab:       "dashboard",
 		needClear: true,
+		logFilter: "ALL",
 	}
 
 	ld.updateSize()
 	ld.render()
 
-	tabOrder := []string{"dashboard", "processes", "network", "cores", "disk"}
+	tabOrder := []string{"dashboard", "processes", "network", "cores", "disk", "logs"}
 
 	for ev := range events {
 		switch ev.Type {
@@ -180,6 +191,48 @@ func StartLiveDashboard(isFast bool) {
 
 			if char == 'q' || char == 'Q' || char == 3 || char == 0x1b { // 3 = Ctrl+C, 0x1b = Esc
 				return
+			}
+
+			// Dedicated interactive controls when inside the Logs tab
+			if ld.tab == "logs" {
+				if char == 'f' || char == 'F' {
+					switch ld.logFilter {
+					case "ALL":
+						ld.logFilter = "ERR"
+					case "ERR":
+						ld.logFilter = "WARN+ERR"
+					case "WARN+ERR":
+						ld.logFilter = "INFO"
+					default:
+						ld.logFilter = "ALL"
+					}
+					ld.logOffset = 0
+					ld.needClear = true
+					ld.render()
+					continue
+				} else if str == "up" || char == 'k' || char == 'K' {
+					ld.logOffset++
+					ld.needClear = true
+					ld.render()
+					continue
+				} else if str == "down" || char == 'j' || char == 'J' {
+					if ld.logOffset > 0 {
+						ld.logOffset--
+					}
+					ld.needClear = true
+					ld.render()
+					continue
+				} else if str == "home" || char == 'g' {
+					ld.logOffset = 9999
+					ld.needClear = true
+					ld.render()
+					continue
+				} else if str == "end" || char == 'G' {
+					ld.logOffset = 0
+					ld.needClear = true
+					ld.render()
+					continue
+				}
 			}
 
 			currentIdx := 0
@@ -219,15 +272,21 @@ func StartLiveDashboard(isFast bool) {
 						ld.tab = "cores"
 						tabChanged = true
 					}
-				case '5', 'i', 'I', 'k', 'K':
+				case '5', 'i', 'I':
 					if ld.tab != "disk" {
 						ld.tab = "disk"
+						tabChanged = true
+					}
+				case '6', 's', 'S', 'o', 'O':
+					if ld.tab != "logs" {
+						ld.tab = "logs"
 						tabChanged = true
 					}
 				}
 			}
 
 			if tabChanged {
+				ld.logOffset = 0
 				ld.needClear = true
 			}
 		case PackageUpdate:
@@ -325,6 +384,7 @@ func (ld *LiveDisplay) render() {
 		return
 	}
 
+	ld.tracker.SetLogsActive(ld.tab == "logs")
 	metrics, err := ld.tracker.GetMetrics()
 	if err != nil {
 		return
@@ -363,6 +423,8 @@ func (ld *LiveDisplay) render() {
 		contentRows = ld.renderCores(metrics, theme, availableHeight)
 	case "disk":
 		contentRows = ld.renderDisk(metrics, theme, availableHeight)
+	case "logs":
+		contentRows = ld.renderLogs(metrics, theme, availableHeight)
 	default:
 		contentRows = ld.renderDashboard(metrics, theme, availableHeight)
 	}
@@ -453,10 +515,11 @@ func (ld *LiveDisplay) getHeaderRows(theme Theme) []string {
 		{"network", "3. NETWORK", "3. NET"},
 		{"cores", "4. CPU CORES", "4. CORES"},
 		{"disk", "5. DISK / IO", "5. DISK"},
+		{"logs", "6. LOGS", "6. LOGS"},
 	}
 
 	var tabStrs []string
-	useShort := w < 95
+	useShort := w < 105
 	for _, t := range tabDefs {
 		label := t.full
 		if useShort {
@@ -498,7 +561,7 @@ func (ld *LiveDisplay) getFooterRows(theme Theme, withLeadingBlank bool) []strin
 
 	keyQ := fmt.Sprintf("%s\033[1;7m Q \033[0m", theme.Accent)
 	keyTab := fmt.Sprintf("%s\033[1;7m Tab \033[0m", theme.Accent)
-	key1 := fmt.Sprintf("%s\033[1;7m 1-5 \033[0m", theme.Accent)
+	key1 := fmt.Sprintf("%s\033[1;7m 1-6 \033[0m", theme.Accent)
 
 	refreshRate := "350ms"
 	if ld.isFast {
@@ -506,7 +569,24 @@ func (ld *LiveDisplay) getFooterRows(theme Theme, withLeadingBlank bool) []strin
 	}
 
 	var leftPart, rightPart string
-	if w >= 95 {
+	if ld.tab == "logs" {
+		filterLabel := ld.logFilter
+		if filterLabel == "" {
+			filterLabel = "ALL"
+		}
+		keyF := fmt.Sprintf("%s\033[1;7m F \033[0m", theme.Accent)
+		keyScroll := fmt.Sprintf("%s\033[1;7m ↑/↓ \033[0m", theme.Accent)
+		if w >= 95 {
+			leftPart = fmt.Sprintf(" %s Quit   %s Filter (%s)   %s Scroll (j/k)   %s Direct Tab", keyQ, keyF, filterLabel, keyScroll, key1)
+			rightPart = fmt.Sprintf("\033[90mRefresh: %s │ KernelView \033[0m", refreshRate)
+		} else if w >= 70 {
+			leftPart = fmt.Sprintf(" %s Quit  %s Filter (%s)  %s Scroll  %s Direct", keyQ, keyF, filterLabel, keyScroll, key1)
+			rightPart = "\033[90mKernelView \033[0m"
+		} else {
+			leftPart = fmt.Sprintf(" %s Quit  %s Filter (%s)", keyQ, keyF, filterLabel)
+			rightPart = ""
+		}
+	} else if w >= 95 {
 		leftPart = fmt.Sprintf(" %s Quit   %s Next Tab (or ←/→/h/l)   %s Direct Tab", keyQ, keyTab, key1)
 		rightPart = fmt.Sprintf("\033[90mRefresh: %s │ KernelView \033[0m", refreshRate)
 	} else if w >= 70 {
@@ -1224,6 +1304,178 @@ func (ld *LiveDisplay) renderDiskCompact(metrics *gather.LiveMetrics, theme Them
 
 	box := drawBox("◆ Disk Storage & Real-Time I/O Telemetry", lines, w, availableHeight, theme)
 	return box
+}
+
+// -------------------------------------------------------------
+// Tab 6: Logs (System Logs & Journal Stream)
+// -------------------------------------------------------------
+
+func (ld *LiveDisplay) renderLogs(metrics *gather.LiveMetrics, theme Theme, availableHeight int) []string {
+	w := ld.termWidth - 2
+	if w < 50 {
+		w = 50
+	}
+
+	timeW := 8
+	if w >= 110 {
+		timeW = 15
+	}
+	levelW := 6
+	srcW := 18
+	if w < 90 {
+		srcW = 15
+	}
+	contentW := w - 4
+	if contentW < 40 {
+		contentW = 40
+	}
+	msgW := contentW - timeW - levelW - srcW - 3
+	if msgW < 12 {
+		msgW = 12
+	}
+
+	var logLines []string
+
+	header := fmt.Sprintf("%s%-*s %-*s %-*s %-*s%s",
+		theme.Key, timeW, "TIME", levelW, "LEVEL", srcW, "SOURCE / DAEMON", msgW, "LOG MESSAGE", theme.Reset)
+	logLines = append(logLines, header)
+	logLines = append(logLines, "\033[90m"+strings.Repeat("─", w-4)+theme.Reset)
+
+	maxRows := availableHeight - 4
+	if maxRows < 1 {
+		maxRows = 1
+	}
+
+	logs := metrics.Logs
+	totalLogs := len(logs)
+
+	if totalLogs == 0 {
+		logLines = append(logLines, "")
+		logLines = append(logLines, "  \033[90mCollecting system logs or journal unavailable...\033[0m")
+		logLines = append(logLines, "  \033[38;5;244mTip: Run with elevated permissions (or add user to systemd-journal group) to stream full logs.\033[0m")
+	} else {
+		// 1. Calculate severity statistics
+		var infoCount, warnCount, errCount, debugCount int
+		for _, l := range logs {
+			switch l.Level {
+			case "ERR":
+				errCount++
+			case "WARN":
+				warnCount++
+			case "DEBUG":
+				debugCount++
+			default:
+				infoCount++
+			}
+		}
+
+		// 2. Apply active filter
+		var filteredLogs []gather.SystemLogEntry
+		for _, l := range logs {
+			switch ld.logFilter {
+			case "ERR":
+				if l.Level == "ERR" {
+					filteredLogs = append(filteredLogs, l)
+				}
+			case "WARN+ERR":
+				if l.Level == "ERR" || l.Level == "WARN" {
+					filteredLogs = append(filteredLogs, l)
+				}
+			case "INFO":
+				if l.Level == "INFO" {
+					filteredLogs = append(filteredLogs, l)
+				}
+			default:
+				filteredLogs = append(filteredLogs, l)
+			}
+		}
+
+		totalFiltered := len(filteredLogs)
+		if totalFiltered == 0 {
+			logLines = append(logLines, "")
+			logLines = append(logLines, fmt.Sprintf("  \033[90mNo logs matching filter [%s]. Press 'f' to change filter.\033[0m", ld.logFilter))
+		} else {
+			// 3. Apply scroll offset
+			maxOffset := totalFiltered - maxRows
+			if maxOffset < 0 {
+				maxOffset = 0
+			}
+			if ld.logOffset > maxOffset {
+				ld.logOffset = maxOffset
+			}
+			if ld.logOffset < 0 {
+				ld.logOffset = 0
+			}
+
+			endIdx := totalFiltered - ld.logOffset
+			startIdx := endIdx - maxRows
+			if startIdx < 0 {
+				startIdx = 0
+			}
+
+			for i := startIdx; i < endIdx; i++ {
+				entry := filteredLogs[i]
+
+				var levelBadge string
+				switch entry.Level {
+				case "ERR":
+					levelBadge = "\033[1;31m[ERR ]\033[0m"
+				case "WARN":
+					levelBadge = "\033[1;33m[WARN]\033[0m"
+				case "DEBUG":
+					levelBadge = "\033[1;36m[DBUG]\033[0m"
+				default:
+					levelBadge = "\033[1;32m[INFO]\033[0m"
+				}
+
+				timeStr := entry.Timestamp
+				if len(timeStr) > timeW {
+					timeStr = timeStr[len(timeStr)-timeW:]
+				}
+
+				srcStr := entry.Source
+				if len(srcStr) > srcW {
+					srcStr = truncateAnsi(srcStr, srcW)
+				}
+
+				msgStr := entry.Message
+				var msgColored string
+				if entry.Level == "ERR" {
+					msgColored = "\033[38;5;203m" + truncateAnsi(msgStr, msgW) + "\033[0m"
+				} else if entry.Level == "WARN" {
+					msgColored = "\033[38;5;215m" + truncateAnsi(msgStr, msgW) + "\033[0m"
+				} else if entry.Level == "DEBUG" {
+					msgColored = "\033[38;5;244m" + truncateAnsi(msgStr, msgW) + "\033[0m"
+				} else {
+					msgColored = "\033[38;5;252m" + truncateAnsi(msgStr, msgW) + "\033[0m"
+				}
+
+				row := fmt.Sprintf("\033[38;5;244m%-*s\033[0m %s \033[38;5;45m%-*s\033[0m %s",
+					timeW, timeStr,
+					levelBadge,
+					srcW, srcStr,
+					msgColored)
+				logLines = append(logLines, row)
+			}
+		}
+	}
+
+	sourceTitle := metrics.LogsSource
+	if sourceTitle == "" {
+		sourceTitle = "System Log Stream"
+	}
+
+	filterBadge := ""
+	if ld.logFilter != "" && ld.logFilter != "ALL" {
+		filterBadge = fmt.Sprintf(" │ Filter: [%s]", ld.logFilter)
+	}
+	scrollBadge := ""
+	if ld.logOffset > 0 {
+		scrollBadge = fmt.Sprintf(" │ \033[1;33m▲ +%d\033[0m", ld.logOffset)
+	}
+
+	title := fmt.Sprintf("⬢ System Logs: %s (%d entries%s%s)", sourceTitle, totalLogs, filterBadge, scrollBadge)
+	return drawBox(title, logLines, w, availableHeight, theme)
 }
 
 // -------------------------------------------------------------

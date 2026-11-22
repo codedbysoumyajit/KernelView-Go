@@ -2984,6 +2984,17 @@ type LiveMetrics struct {
 	NetIface       string
 	Processes      []ProcessInfo
 	GPUMetrics     LiveGPUMetrics // GPU telemetry details (Exported)
+	Logs           []SystemLogEntry
+	LogsSource     string
+}
+
+// SystemLogEntry represents a parsed log line for the live dashboard (Exported)
+type SystemLogEntry struct {
+	Timestamp string
+	Source    string
+	Message   string
+	Level     string // "INFO", "WARN", "ERR", "DEBUG"
+	Raw       string
 }
 
 // LiveTracker tracks metrics across real-time updates (Exported)
@@ -3038,6 +3049,13 @@ type LiveTracker struct {
 	smoothedCores []float64
 	smoothedNetRx float64
 	smoothedNetTx float64
+
+	// Cached system logs
+	cachedLogs      []SystemLogEntry
+	cachedLogSource string
+	lastLogsUpdate  time.Time
+	logsScanning    bool
+	logsActive      bool
 }
 
 // fastLinuxMeminfo parses /proc/meminfo in a single pass without allocations
@@ -3587,6 +3605,16 @@ func (lt *LiveTracker) GetMetrics() (*LiveMetrics, error) {
 		lt.prevDiskTime = nowDisk
 	}
 
+	// 10. System Logs (asynchronous background collection: on startup, or actively when tab is open)
+	shouldScanLogs := (lt.lastLogsUpdate.IsZero() || len(lt.cachedLogs) == 0) ||
+		(lt.logsActive && time.Since(lt.lastLogsUpdate) >= 2500*time.Millisecond)
+	if shouldScanLogs && !lt.logsScanning {
+		lt.logsScanning = true
+		go lt.scanLogsAsync()
+	}
+	metrics.Logs = lt.cachedLogs
+	metrics.LogsSource = lt.cachedLogSource
+
 	return metrics, nil
 }
 
@@ -3713,6 +3741,434 @@ func (lt *LiveTracker) scanProcessesAsync() {
 	lt.cachedProcesses = procList
 	lt.lastProcUpdate = time.Now()
 	lt.mu.Unlock()
+}
+
+// SetLogsActive signals whether the Logs tab is currently active (enabling frequent refreshes)
+func (lt *LiveTracker) SetLogsActive(active bool) {
+	lt.mu.Lock()
+	lt.logsActive = active
+	lt.mu.Unlock()
+}
+
+func (lt *LiveTracker) scanLogsAsync() {
+	defer func() {
+		lt.mu.Lock()
+		lt.logsScanning = false
+		lt.mu.Unlock()
+	}()
+
+	logs, src := collectSystemLogs()
+	lt.mu.Lock()
+	if len(logs) > 0 {
+		lt.cachedLogs = logs
+		lt.cachedLogSource = src
+	}
+	lt.lastLogsUpdate = time.Now()
+	lt.mu.Unlock()
+}
+
+func collectSystemLogs() ([]SystemLogEntry, string) {
+	switch runtime.GOOS {
+	case "linux":
+		return collectLinuxLogs()
+	case "darwin":
+		return collectDarwinLogs()
+	case "windows":
+		return collectWindowsLogs()
+	default:
+		return collectUnixFallbackLogs()
+	}
+}
+
+func isLogMonth(s string) bool {
+	switch s {
+	case "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec":
+		return true
+	}
+	return false
+}
+
+func parseSystemLogLine(line string) (SystemLogEntry, bool) {
+	line = strings.TrimSpace(line)
+	if line == "" || strings.HasPrefix(line, "--") {
+		return SystemLogEntry{}, false
+	}
+
+	entry := SystemLogEntry{Raw: line}
+	fields := strings.Fields(line)
+
+	if len(fields) >= 4 && isLogMonth(fields[0]) {
+		// Standard syslog: "Nov 22 12:44:31 host daemon[123]: message"
+		entry.Timestamp = fields[2]
+		if len(fields) >= 5 {
+			var src string
+			var msgStart int
+			for i := 4; i < len(fields) && i < 7; i++ {
+				if strings.HasSuffix(fields[i], ":") {
+					src = strings.Join(fields[4:i+1], " ")
+					src = strings.TrimSuffix(src, ":")
+					msgStart = i + 1
+					break
+				}
+			}
+			if src == "" {
+				src = strings.TrimSuffix(fields[4], ":")
+				msgStart = 5
+			}
+			entry.Source = src
+			if msgStart > 0 && msgStart < len(fields) {
+				entry.Message = strings.Join(fields[msgStart:], " ")
+			} else {
+				entry.Message = strings.Join(fields[4:], " ")
+			}
+		} else if len(fields) == 4 {
+			entry.Message = fields[3]
+		}
+	} else if len(fields) >= 3 && strings.Contains(fields[0], "T") && (strings.Contains(fields[0], "-") || strings.Contains(fields[0], ":")) {
+		// ISO timestamp: "2026-11-22T12:44:31+05:30 host daemon[123]: message"
+		tParts := strings.Split(fields[0], "T")
+		if len(tParts) == 2 {
+			timePart := tParts[1]
+			if len(timePart) >= 8 {
+				entry.Timestamp = timePart[:8]
+			} else {
+				entry.Timestamp = timePart
+			}
+		} else {
+			entry.Timestamp = fields[0]
+		}
+		if len(fields) >= 3 {
+			entry.Source = strings.TrimSuffix(fields[2], ":")
+			entry.Message = strings.Join(fields[3:], " ")
+		}
+	} else if len(fields) >= 2 && strings.HasPrefix(fields[0], "[") && strings.HasSuffix(fields[0], "]") {
+		// dmesg format: "[ 1234.567890] daemon: message"
+		entry.Timestamp = strings.Trim(fields[0], "[]")
+		entry.Message = strings.Join(fields[1:], " ")
+		colonIdx := strings.Index(entry.Message, ": ")
+		if colonIdx > 0 && colonIdx < 30 {
+			entry.Source = entry.Message[:colonIdx]
+			entry.Message = entry.Message[colonIdx+2:]
+		}
+	} else {
+		entry.Message = line
+		entry.Source = "system"
+	}
+
+	if entry.Source == "" {
+		entry.Source = "system"
+	}
+	if entry.Timestamp == "" {
+		entry.Timestamp = time.Now().Format("15:04:05")
+	}
+
+	textForLevel := strings.ToLower(entry.Message + " " + entry.Source)
+	if strings.Contains(textForLevel, "err") || strings.Contains(textForLevel, "fail") ||
+		strings.Contains(textForLevel, "crit") || strings.Contains(textForLevel, "fatal") ||
+		strings.Contains(textForLevel, "emerg") || strings.Contains(textForLevel, "segfault") ||
+		strings.Contains(textForLevel, "denied") || strings.Contains(textForLevel, "panic") ||
+		strings.Contains(textForLevel, "exception") || strings.Contains(textForLevel, "error") {
+		entry.Level = "ERR"
+	} else if strings.Contains(textForLevel, "warn") {
+		entry.Level = "WARN"
+	} else if strings.Contains(textForLevel, "debug") || strings.Contains(textForLevel, "trace") {
+		entry.Level = "DEBUG"
+	} else {
+		entry.Level = "INFO"
+	}
+
+	return entry, true
+}
+
+func parseLogLines(lines []string) []SystemLogEntry {
+	var entries []SystemLogEntry
+	for _, l := range lines {
+		if entry, ok := parseSystemLogLine(l); ok {
+			entries = append(entries, entry)
+		}
+	}
+	return entries
+}
+
+func readTailLogFile(path string, maxLines int) ([]SystemLogEntry, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	stat, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+
+	readSize := int64(64 * 1024)
+	if stat.Size() < readSize {
+		readSize = stat.Size()
+	}
+
+	buf := make([]byte, readSize)
+	_, err = f.ReadAt(buf, stat.Size()-readSize)
+	if err != nil && err != io.EOF {
+		return nil, err
+	}
+
+	scanner := bufio.NewScanner(bytes.NewReader(buf))
+	var lines []string
+	for scanner.Scan() {
+		lines = append(lines, scanner.Text())
+	}
+
+	if stat.Size() > readSize && len(lines) > 0 {
+		lines = lines[1:]
+	}
+
+	if len(lines) > maxLines {
+		lines = lines[len(lines)-maxLines:]
+	}
+
+	return parseLogLines(lines), nil
+}
+
+func collectLinuxLogs() ([]SystemLogEntry, string) {
+	// 1. Direct file access (/var/log/syslog, /var/log/messages)
+	for _, p := range []string{"/var/log/syslog", "/var/log/messages"} {
+		if entries, err := readTailLogFile(p, 80); err == nil && len(entries) > 0 {
+			return entries, p
+		}
+	}
+
+	isRoot := (os.Geteuid() == 0)
+
+	// 2. Non-root fast path: query user journalctl (<15ms vs 9s for system journal)
+	if !isRoot {
+		ctxU, cancelU := context.WithTimeout(context.Background(), 800*time.Millisecond)
+		defer cancelU()
+		cmdU := exec.CommandContext(ctxU, "journalctl", "--user", "-n", "80", "--no-pager", "-q")
+		outU, errU := cmdU.Output()
+		if errU == nil && len(outU) > 0 {
+			entries := parseLogLines(strings.Split(string(outU), "\n"))
+			if len(entries) > 0 {
+				return entries, "journalctl (--user)"
+			}
+		}
+	}
+
+	// 3. Fast boot-scoped system journalctl (-b restricts scan to current boot)
+	ctxB, cancelB := context.WithTimeout(context.Background(), 1000*time.Millisecond)
+	defer cancelB()
+	cmdB := exec.CommandContext(ctxB, "journalctl", "-b", "-n", "80", "--no-pager", "-q")
+	outB, errB := cmdB.Output()
+	if errB == nil && len(outB) > 0 {
+		entries := parseLogLines(strings.Split(string(outB), "\n"))
+		if len(entries) > 0 {
+			return entries, "journalctl (system)"
+		}
+	}
+
+	// 4. Standard system journalctl fallback
+	ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "journalctl", "-n", "80", "--no-pager", "-q")
+	out, err := cmd.Output()
+	if err == nil && len(out) > 0 {
+		entries := parseLogLines(strings.Split(string(out), "\n"))
+		if len(entries) > 0 {
+			return entries, "journalctl (system)"
+		}
+	}
+
+	// 5. Fallback to dmesg (kernel ring buffer)
+	ctxD, cancelD := context.WithTimeout(context.Background(), 800*time.Millisecond)
+	defer cancelD()
+	cmdD := exec.CommandContext(ctxD, "dmesg", "-T")
+	outD, errD := cmdD.Output()
+	if errD == nil && len(outD) > 0 {
+		lines := strings.Split(string(outD), "\n")
+		if len(lines) > 80 {
+			lines = lines[len(lines)-80:]
+		}
+		entries := parseLogLines(lines)
+		if len(entries) > 0 {
+			return entries, "dmesg (kernel)"
+		}
+	}
+
+	return nil, ""
+}
+
+func collectDarwinLogs() ([]SystemLogEntry, string) {
+	// 1. Direct file access
+	for _, p := range []string{"/var/log/system.log", "/var/log/install.log", "/var/log/wifi.log"} {
+		if entries, err := readTailLogFile(p, 80); err == nil && len(entries) > 0 {
+			return entries, p
+		}
+	}
+
+	// 2. Compact unified log show
+	ctx, cancel := context.WithTimeout(context.Background(), 1000*time.Millisecond)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "log", "show", "--predicate", "process != \"\"", "--last", "2m", "--style", "compact")
+	out, err := cmd.Output()
+	if err == nil && len(out) > 0 {
+		entries := parseLogLines(strings.Split(string(out), "\n"))
+		if len(entries) > 0 {
+			return entries, "log show (macOS)"
+		}
+	}
+
+	// 3. Syslog fallback
+	ctxS, cancelS := context.WithTimeout(context.Background(), 800*time.Millisecond)
+	defer cancelS()
+	cmdS := exec.CommandContext(ctxS, "syslog", "-k", "Sender", "kernel")
+	outS, errS := cmdS.Output()
+	if errS == nil && len(outS) > 0 {
+		lines := strings.Split(string(outS), "\n")
+		if len(lines) > 80 {
+			lines = lines[len(lines)-80:]
+		}
+		entries := parseLogLines(lines)
+		if len(entries) > 0 {
+			return entries, "syslog (macOS)"
+		}
+	}
+
+	return nil, ""
+}
+
+func parseWindowsEventText(output string) []SystemLogEntry {
+	blocks := strings.Split(output, "Event[")
+	var entries []SystemLogEntry
+	for _, block := range blocks {
+		block = strings.TrimSpace(block)
+		if block == "" {
+			continue
+		}
+		var entry SystemLogEntry
+		lines := strings.Split(block, "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "Source:") {
+				entry.Source = strings.TrimSpace(strings.TrimPrefix(line, "Source:"))
+			} else if strings.HasPrefix(line, "Date:") {
+				dateStr := strings.TrimSpace(strings.TrimPrefix(line, "Date:"))
+				if idx := strings.Index(dateStr, "T"); idx != -1 && len(dateStr) >= idx+9 {
+					entry.Timestamp = dateStr[idx+1 : idx+9]
+				} else {
+					entry.Timestamp = dateStr
+				}
+			} else if strings.HasPrefix(line, "Level:") {
+				lvl := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(line, "Level:")))
+				if strings.Contains(lvl, "err") || strings.Contains(lvl, "crit") {
+					entry.Level = "ERR"
+				} else if strings.Contains(lvl, "warn") {
+					entry.Level = "WARN"
+				} else if strings.Contains(lvl, "verb") || strings.Contains(lvl, "debug") {
+					entry.Level = "DEBUG"
+				} else {
+					entry.Level = "INFO"
+				}
+			} else if strings.HasPrefix(line, "Description:") {
+				entry.Message = strings.TrimSpace(strings.TrimPrefix(line, "Description:"))
+			}
+		}
+		if entry.Message != "" || entry.Source != "" {
+			if entry.Source == "" {
+				entry.Source = "System"
+			}
+			if entry.Level == "" {
+				entry.Level = "INFO"
+			}
+			if entry.Timestamp == "" {
+				entry.Timestamp = time.Now().Format("15:04:05")
+			}
+			entries = append(entries, entry)
+		}
+	}
+	return entries
+}
+
+func parsePipeLogLines(lines []string) []SystemLogEntry {
+	var entries []SystemLogEntry
+	for _, l := range lines {
+		l = strings.TrimSpace(l)
+		if l == "" {
+			continue
+		}
+		parts := strings.SplitN(l, "|", 4)
+		if len(parts) >= 4 {
+			lvl := strings.ToUpper(strings.TrimSpace(parts[1]))
+			if strings.Contains(lvl, "ERR") || strings.Contains(lvl, "CRIT") {
+				lvl = "ERR"
+			} else if strings.Contains(lvl, "WARN") {
+				lvl = "WARN"
+			} else if strings.Contains(lvl, "DEBUG") {
+				lvl = "DEBUG"
+			} else {
+				lvl = "INFO"
+			}
+			entries = append(entries, SystemLogEntry{
+				Timestamp: strings.TrimSpace(parts[0]),
+				Level:     lvl,
+				Source:    strings.TrimSpace(parts[2]),
+				Message:   strings.TrimSpace(parts[3]),
+				Raw:       l,
+			})
+		}
+	}
+	return entries
+}
+
+func collectWindowsLogs() ([]SystemLogEntry, string) {
+	// 1. Try wevtutil
+	ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "wevtutil", "qe", "System", "/c:60", "/rd:true", "/f:text")
+	out, err := cmd.Output()
+	if err == nil && len(out) > 0 {
+		entries := parseWindowsEventText(string(out))
+		if len(entries) > 0 {
+			return entries, "Event Log (System)"
+		}
+	}
+
+	// 2. PowerShell pipe fallback
+	ctxPS, cancelPS := context.WithTimeout(context.Background(), 1200*time.Millisecond)
+	defer cancelPS()
+	psScript := "Get-WinEvent -LogName System -MaxEvents 50 | ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.TimeCreated.ToString('HH:mm:ss'), $_.LevelDisplayName, $_.ProviderName, ($_.Message -replace '[\\r\\n]+', ' ') }"
+	cmdPS := exec.CommandContext(ctxPS, "powershell", "-NoProfile", "-NonInteractive", "-Command", psScript)
+	outPS, errPS := cmdPS.Output()
+	if errPS == nil && len(outPS) > 0 {
+		entries := parsePipeLogLines(strings.Split(string(outPS), "\n"))
+		if len(entries) > 0 {
+			return entries, "PowerShell Get-WinEvent"
+		}
+	}
+
+	return nil, ""
+}
+
+func collectUnixFallbackLogs() ([]SystemLogEntry, string) {
+	for _, p := range []string{"/var/log/messages", "/var/log/syslog", "/var/log/daemon.log", "/var/log/auth.log"} {
+		if entries, err := readTailLogFile(p, 80); err == nil && len(entries) > 0 {
+			return entries, p
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "dmesg")
+	out, err := cmd.Output()
+	if err == nil && len(out) > 0 {
+		lines := strings.Split(string(out), "\n")
+		if len(lines) > 80 {
+			lines = lines[len(lines)-80:]
+		}
+		entries := parseLogLines(lines)
+		if len(entries) > 0 {
+			return entries, "dmesg"
+		}
+	}
+	return nil, ""
 }
 
 func (lt *LiveTracker) getLinuxDRMGPU() (LiveGPUMetrics, bool) {
