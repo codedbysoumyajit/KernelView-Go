@@ -89,6 +89,7 @@ The interactive terminal dashboard has been engineered for maximum responsivenes
 ---
 
 ### 5. 🛡️ Standards Compliance & Quality-of-Life
+* **110+ Distro Logos & Fastfetch Theming**: Integrated over 65 additional iconic distro logos and authentic brand palette schemes directly from Fastfetch (including Amazon Linux, KDE Linux, Proxmox VE, Armbian, DietPi, Linux Lite, GhostBSD, NomadBSD, MidnightBSD, ArchLabs, Antergos, Siduction, ALT Linux, OpenMandriva, ROSA, Red Star OS, Scientific Linux, Feren OS, Nitrux, SparkyLinux, CoreOS, Flatcar, openEuler, Kylin, UOS, SmartOS, Bedrock, Chakra, Netrunner, Exherbo, SliTaz, Frugalware, Slackware, Raspbian, Artix, Asahi, Haiku, GNU Guix, Devuan, Mageia, ArcoLinux, KaOS, Bodhi, DragonFly BSD, Solaris/illumos, Android, ChromeOS, Archcraft, BlackArch, Athena OS, Endless OS, BunsenLabs, PureOS, CRUX, Chimera, Vanilla OS, Aurora, postmarketOS, Kubuntu, Xubuntu, Lubuntu, OpenWrt, RebornOS, Trisquel, Hyperbola, Parabola, Minix).
 * **`NO_COLOR` Specification Support**: Full compliance with [no-color.org](https://no-color.org/) — setting the `NO_COLOR` environment variable or using `--no-color` cleanly disables all ANSI styling and color blocks across every mode.
 * **Color-Preserving ANSI Truncation**: Text truncated on narrow terminal windows retains its syntax highlighting and theme accents without stripping styling.
 * **Distro Logo Enhancements**: Updated Linux unknown/generic distro ASCII art with an authentic Tux penguin logo.

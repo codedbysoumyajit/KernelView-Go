@@ -100,12 +100,22 @@ func getDistroKey() string {
 	if runtime.GOOS == "netbsd" {
 		return "netbsd"
 	}
+	if runtime.GOOS == "dragonfly" {
+		return "dragonfly"
+	}
+	if runtime.GOOS == "solaris" || runtime.GOOS == "illumos" {
+		return "solaris"
+	}
+	if runtime.GOOS == "android" {
+		return "android"
+	}
 
-	// Read standard /etc/os-release or /usr/lib/os-release
-	osReleasePaths := []string{"/etc/os-release", "/usr/lib/os-release"}
+	// Read standard /etc/os-release or /usr/lib/os-release (with PREFIX prioritized for chroot/Termux)
+	var osReleasePaths []string
 	if prefix := os.Getenv("PREFIX"); prefix != "" {
 		osReleasePaths = append(osReleasePaths, prefix+"/etc/os-release")
 	}
+	osReleasePaths = append(osReleasePaths, "/etc/os-release", "/usr/lib/os-release")
 
 	for _, path := range osReleasePaths {
 		if content, err := os.ReadFile(path); err == nil {
@@ -202,6 +212,140 @@ func getDistroKey() string {
 				return "opensuse"
 			case "linuxmint", "mint":
 				return "mint"
+			case "slackware":
+				return "slackware"
+			case "raspbian":
+				return "raspbian"
+			case "artix":
+				return "artix"
+			case "devuan":
+				return "devuan"
+			case "mageia":
+				return "mageia"
+			case "arcolinux", "arco":
+				return "arcolinux"
+			case "kaos":
+				return "kaos"
+			case "guix":
+				return "guix"
+			case "bodhi":
+				return "bodhi"
+			case "asahi":
+				return "asahi"
+			case "dragonfly":
+				return "dragonfly"
+			case "solaris", "illumos", "openindiana":
+				return "solaris"
+			case "haiku":
+				return "haiku"
+			case "android":
+				return "android"
+			case "chromeos", "chromiumos":
+				return "chromeos"
+			case "archcraft":
+				return "archcraft"
+			case "blackarch":
+				return "blackarch"
+			case "athena", "athenaos":
+				return "athena"
+			case "endless":
+				return "endless"
+			case "bunsenlabs":
+				return "bunsenlabs"
+			case "pureos":
+				return "pureos"
+			case "crux":
+				return "crux"
+			case "chimera", "chimeraphile":
+				return "chimera"
+			case "vanilla", "vanillaos":
+				return "vanilla"
+			case "aurora":
+				return "aurora"
+			case "postmarketos":
+				return "postmarketos"
+			case "kubuntu":
+				return "kubuntu"
+			case "xubuntu":
+				return "xubuntu"
+			case "lubuntu":
+				return "lubuntu"
+			case "openwrt":
+				return "openwrt"
+			case "rebornos":
+				return "rebornos"
+			case "trisquel":
+				return "trisquel"
+			case "hyperbola":
+				return "hyperbola"
+			case "parabola":
+				return "parabola"
+			case "minix":
+				return "minix"
+			case "amazon", "amzn":
+				return "amazon"
+			case "kdelinux", "kde":
+				return "kdelinux"
+			case "pve", "proxmox":
+				return "proxmox"
+			case "armbian":
+				return "armbian"
+			case "dietpi":
+				return "dietpi"
+			case "linuxlite", "lite":
+				return "linuxlite"
+			case "ghostbsd":
+				return "ghostbsd"
+			case "nomadbsd":
+				return "nomadbsd"
+			case "midnightbsd":
+				return "midnightbsd"
+			case "archlabs":
+				return "archlabs"
+			case "antergos":
+				return "antergos"
+			case "siduction":
+				return "siduction"
+			case "altlinux", "alt":
+				return "altlinux"
+			case "openmandriva":
+				return "openmandriva"
+			case "rosa":
+				return "rosa"
+			case "redstar":
+				return "redstar"
+			case "scientific", "scientificlinux", "sl":
+				return "scientific"
+			case "feren", "ferenos":
+				return "feren"
+			case "nitrux":
+				return "nitrux"
+			case "sparky", "sparkylinux":
+				return "sparky"
+			case "coreos", "fedora-coreos":
+				return "coreos"
+			case "flatcar":
+				return "flatcar"
+			case "openeuler":
+				return "openeuler"
+			case "kylin", "openkylin":
+				return "kylin"
+			case "uos":
+				return "uos"
+			case "smartos":
+				return "smartos"
+			case "bedrock":
+				return "bedrock"
+			case "chakra":
+				return "chakra"
+			case "netrunner":
+				return "netrunner"
+			case "exherbo":
+				return "exherbo"
+			case "slitaz":
+				return "slitaz"
+			case "frugalware":
+				return "frugalware"
 			}
 
 			// Substring / id_like fallback
@@ -320,6 +464,207 @@ func getDistroKey() string {
 			if strings.Contains(combined, "mint") {
 				return "mint"
 			}
+			if strings.Contains(combined, "slackware") {
+				return "slackware"
+			}
+			if strings.Contains(combined, "raspbian") || strings.Contains(combined, "raspberry") {
+				return "raspbian"
+			}
+			if strings.Contains(combined, "artix") {
+				return "artix"
+			}
+			if strings.Contains(combined, "devuan") {
+				return "devuan"
+			}
+			if strings.Contains(combined, "mageia") {
+				return "mageia"
+			}
+			if strings.Contains(combined, "arcolinux") || strings.Contains(combined, "arco") {
+				return "arcolinux"
+			}
+			if strings.Contains(combined, "kaos") {
+				return "kaos"
+			}
+			if strings.Contains(combined, "guix") {
+				return "guix"
+			}
+			if strings.Contains(combined, "bodhi") {
+				return "bodhi"
+			}
+			if strings.Contains(combined, "asahi") {
+				return "asahi"
+			}
+			if strings.Contains(combined, "dragonfly") {
+				return "dragonfly"
+			}
+			if strings.Contains(combined, "solaris") || strings.Contains(combined, "illumos") || strings.Contains(combined, "openindiana") {
+				return "solaris"
+			}
+			if strings.Contains(combined, "haiku") {
+				return "haiku"
+			}
+			if strings.Contains(combined, "android") {
+				return "android"
+			}
+			if strings.Contains(combined, "chromeos") || strings.Contains(combined, "chromium") {
+				return "chromeos"
+			}
+			if strings.Contains(combined, "archcraft") {
+				return "archcraft"
+			}
+			if strings.Contains(combined, "blackarch") {
+				return "blackarch"
+			}
+			if strings.Contains(combined, "athena") {
+				return "athena"
+			}
+			if strings.Contains(combined, "endless") {
+				return "endless"
+			}
+			if strings.Contains(combined, "bunsenlabs") {
+				return "bunsenlabs"
+			}
+			if strings.Contains(combined, "pureos") {
+				return "pureos"
+			}
+			if strings.Contains(combined, "crux") {
+				return "crux"
+			}
+			if strings.Contains(combined, "chimera") {
+				return "chimera"
+			}
+			if strings.Contains(combined, "vanilla") {
+				return "vanilla"
+			}
+			if strings.Contains(combined, "aurora") {
+				return "aurora"
+			}
+			if strings.Contains(combined, "postmarketos") {
+				return "postmarketos"
+			}
+			if strings.Contains(combined, "kubuntu") {
+				return "kubuntu"
+			}
+			if strings.Contains(combined, "xubuntu") {
+				return "xubuntu"
+			}
+			if strings.Contains(combined, "lubuntu") {
+				return "lubuntu"
+			}
+			if strings.Contains(combined, "openwrt") {
+				return "openwrt"
+			}
+			if strings.Contains(combined, "rebornos") {
+				return "rebornos"
+			}
+			if strings.Contains(combined, "trisquel") {
+				return "trisquel"
+			}
+			if strings.Contains(combined, "hyperbola") {
+				return "hyperbola"
+			}
+			if strings.Contains(combined, "parabola") {
+				return "parabola"
+			}
+			if strings.Contains(combined, "minix") {
+				return "minix"
+			}
+			if strings.Contains(combined, "amazon") || strings.Contains(combined, "amzn") {
+				return "amazon"
+			}
+			if strings.Contains(combined, "kdelinux") || strings.Contains(combined, "kde linux") {
+				return "kdelinux"
+			}
+			if strings.Contains(combined, "proxmox") || strings.Contains(combined, "pve") {
+				return "proxmox"
+			}
+			if strings.Contains(combined, "armbian") {
+				return "armbian"
+			}
+			if strings.Contains(combined, "dietpi") {
+				return "dietpi"
+			}
+			if strings.Contains(combined, "linuxlite") || strings.Contains(combined, "linux lite") {
+				return "linuxlite"
+			}
+			if strings.Contains(combined, "ghostbsd") {
+				return "ghostbsd"
+			}
+			if strings.Contains(combined, "nomadbsd") {
+				return "nomadbsd"
+			}
+			if strings.Contains(combined, "midnightbsd") {
+				return "midnightbsd"
+			}
+			if strings.Contains(combined, "archlabs") {
+				return "archlabs"
+			}
+			if strings.Contains(combined, "antergos") {
+				return "antergos"
+			}
+			if strings.Contains(combined, "siduction") {
+				return "siduction"
+			}
+			if strings.Contains(combined, "altlinux") || strings.Contains(combined, "alt linux") {
+				return "altlinux"
+			}
+			if strings.Contains(combined, "openmandriva") {
+				return "openmandriva"
+			}
+			if strings.Contains(combined, "rosa") {
+				return "rosa"
+			}
+			if strings.Contains(combined, "redstar") || strings.Contains(combined, "red star") {
+				return "redstar"
+			}
+			if strings.Contains(combined, "scientific") {
+				return "scientific"
+			}
+			if strings.Contains(combined, "feren") {
+				return "feren"
+			}
+			if strings.Contains(combined, "nitrux") {
+				return "nitrux"
+			}
+			if strings.Contains(combined, "sparky") {
+				return "sparky"
+			}
+			if strings.Contains(combined, "coreos") {
+				return "coreos"
+			}
+			if strings.Contains(combined, "flatcar") {
+				return "flatcar"
+			}
+			if strings.Contains(combined, "openeuler") {
+				return "openeuler"
+			}
+			if strings.Contains(combined, "kylin") {
+				return "kylin"
+			}
+			if strings.Contains(combined, "uos") || strings.Contains(combined, "uniontech") {
+				return "uos"
+			}
+			if strings.Contains(combined, "smartos") {
+				return "smartos"
+			}
+			if strings.Contains(combined, "bedrock") {
+				return "bedrock"
+			}
+			if strings.Contains(combined, "chakra") {
+				return "chakra"
+			}
+			if strings.Contains(combined, "netrunner") {
+				return "netrunner"
+			}
+			if strings.Contains(combined, "exherbo") {
+				return "exherbo"
+			}
+			if strings.Contains(combined, "slitaz") {
+				return "slitaz"
+			}
+			if strings.Contains(combined, "frugalware") {
+				return "frugalware"
+			}
 		}
 	}
 	if runtime.GOOS == "linux" {
@@ -337,6 +682,542 @@ func GetThemeForDistro(distroKey string, noColor bool) Theme {
 	reset := "\033[0m"
 
 	switch distroKey {
+	case "amazon":
+		return Theme{
+			Category: "\033[1;38;5;208m", // Bold Amazon Orange
+			Key:      "\033[1;38;5;208m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;208m",
+			Reset:    reset,
+		}
+	case "kdelinux":
+		return Theme{
+			Category: "\033[1;38;5;39m", // Bold KDE Blue
+			Key:      "\033[1;38;5;39m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;39m",
+			Reset:    reset,
+		}
+	case "proxmox":
+		return Theme{
+			Category: "\033[1;38;5;202m", // Bold Proxmox Orange
+			Key:      "\033[1;38;5;202m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;202m",
+			Reset:    reset,
+		}
+	case "armbian":
+		return Theme{
+			Category: "\033[1;38;5;196m", // Bold Armbian Red
+			Key:      "\033[1;38;5;196m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;196m",
+			Reset:    reset,
+		}
+	case "dietpi":
+		return Theme{
+			Category: "\033[1;38;5;76m", // Bold DietPi Green
+			Key:      "\033[1;38;5;76m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;76m",
+			Reset:    reset,
+		}
+	case "linuxlite":
+		return Theme{
+			Category: "\033[1;38;5;148m", // Bold Linux Lite Lime
+			Key:      "\033[1;38;5;148m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;148m",
+			Reset:    reset,
+		}
+	case "ghostbsd":
+		return Theme{
+			Category: "\033[1;38;5;39m", // Bold GhostBSD Cyan
+			Key:      "\033[1;38;5;39m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;39m",
+			Reset:    reset,
+		}
+	case "nomadbsd":
+		return Theme{
+			Category: "\033[1;38;5;67m", // Bold NomadBSD Steel Blue
+			Key:      "\033[1;38;5;67m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;67m",
+			Reset:    reset,
+		}
+	case "midnightbsd":
+		return Theme{
+			Category: "\033[1;38;5;97m", // Bold MidnightBSD Violet
+			Key:      "\033[1;38;5;97m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;97m",
+			Reset:    reset,
+		}
+	case "archlabs":
+		return Theme{
+			Category: "\033[1;38;5;66m", // Bold ArchLabs Slate
+			Key:      "\033[1;38;5;66m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;66m",
+			Reset:    reset,
+		}
+	case "antergos":
+		return Theme{
+			Category: "\033[1;38;5;33m", // Bold Antergos Blue
+			Key:      "\033[1;38;5;33m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;33m",
+			Reset:    reset,
+		}
+	case "siduction":
+		return Theme{
+			Category: "\033[1;38;5;32m", // Bold Siduction Blue
+			Key:      "\033[1;38;5;32m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;32m",
+			Reset:    reset,
+		}
+	case "altlinux":
+		return Theme{
+			Category: "\033[1;38;5;214m", // Bold ALT Linux Gold
+			Key:      "\033[1;38;5;214m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;214m",
+			Reset:    reset,
+		}
+	case "openmandriva":
+		return Theme{
+			Category: "\033[1;38;5;33m", // Bold OpenMandriva Blue
+			Key:      "\033[1;38;5;33m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;33m",
+			Reset:    reset,
+		}
+	case "rosa":
+		return Theme{
+			Category: "\033[1;38;5;75m", // Bold ROSA Blue
+			Key:      "\033[1;38;5;75m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;75m",
+			Reset:    reset,
+		}
+	case "redstar":
+		return Theme{
+			Category: "\033[1;31m", // Bold Red Star Crimson
+			Key:      "\033[1;31m",
+			Value:    valColor,
+			Accent:   "\033[1;31m",
+			Reset:    reset,
+		}
+	case "scientific":
+		return Theme{
+			Category: "\033[1;38;5;33m", // Bold Scientific Blue
+			Key:      "\033[1;38;5;33m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;33m",
+			Reset:    reset,
+		}
+	case "feren":
+		return Theme{
+			Category: "\033[1;38;5;38m", // Bold Feren Sky Blue
+			Key:      "\033[1;38;5;38m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;38m",
+			Reset:    reset,
+		}
+	case "nitrux":
+		return Theme{
+			Category: "\033[1;38;5;176m", // Bold Nitrux Purple
+			Key:      "\033[1;38;5;176m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;176m",
+			Reset:    reset,
+		}
+	case "sparky":
+		return Theme{
+			Category: "\033[1;38;5;196m", // Bold Sparky Red
+			Key:      "\033[1;38;5;196m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;196m",
+			Reset:    reset,
+		}
+	case "coreos":
+		return Theme{
+			Category: "\033[1;38;5;32m", // Bold CoreOS Blue
+			Key:      "\033[1;38;5;32m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;32m",
+			Reset:    reset,
+		}
+	case "flatcar":
+		return Theme{
+			Category: "\033[1;38;5;37m", // Bold Flatcar Aqua
+			Key:      "\033[1;38;5;37m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;37m",
+			Reset:    reset,
+		}
+	case "openeuler":
+		return Theme{
+			Category: "\033[1;38;5;33m", // Bold openEuler Blue
+			Key:      "\033[1;38;5;33m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;33m",
+			Reset:    reset,
+		}
+	case "kylin":
+		return Theme{
+			Category: "\033[1;38;5;27m", // Bold Kylin Blue
+			Key:      "\033[1;38;5;27m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;27m",
+			Reset:    reset,
+		}
+	case "uos":
+		return Theme{
+			Category: "\033[1;38;5;33m", // Bold UOS Blue
+			Key:      "\033[1;38;5;33m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;33m",
+			Reset:    reset,
+		}
+	case "smartos":
+		return Theme{
+			Category: "\033[1;38;5;39m", // Bold SmartOS Azure
+			Key:      "\033[1;38;5;39m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;39m",
+			Reset:    reset,
+		}
+	case "bedrock":
+		return Theme{
+			Category: "\033[1;37m", // Bold Bedrock White
+			Key:      "\033[1;37m",
+			Value:    valColor,
+			Accent:   "\033[1;37m",
+			Reset:    reset,
+		}
+	case "chakra":
+		return Theme{
+			Category: "\033[1;38;5;33m", // Bold Chakra Blue
+			Key:      "\033[1;38;5;33m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;33m",
+			Reset:    reset,
+		}
+	case "netrunner":
+		return Theme{
+			Category: "\033[1;38;5;39m", // Bold Netrunner Blue
+			Key:      "\033[1;38;5;39m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;39m",
+			Reset:    reset,
+		}
+	case "exherbo":
+		return Theme{
+			Category: "\033[1;38;5;67m", // Bold Exherbo Steel
+			Key:      "\033[1;38;5;67m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;67m",
+			Reset:    reset,
+		}
+	case "slitaz":
+		return Theme{
+			Category: "\033[1;38;5;214m", // Bold SliTaz Amber
+			Key:      "\033[1;38;5;214m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;214m",
+			Reset:    reset,
+		}
+	case "frugalware":
+		return Theme{
+			Category: "\033[1;38;5;39m", // Bold Frugalware Azure
+			Key:      "\033[1;38;5;39m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;39m",
+			Reset:    reset,
+		}
+	case "slackware":
+		return Theme{
+			Category: "\033[1;34m", // Bold Slackware Blue
+			Key:      "\033[1;34m",
+			Value:    valColor,
+			Accent:   "\033[1;34m",
+			Reset:    reset,
+		}
+	case "raspbian":
+		return Theme{
+			Category: "\033[1;38;5;197m", // Bold Raspberry Red
+			Key:      "\033[1;38;5;197m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;197m",
+			Reset:    reset,
+		}
+	case "artix":
+		return Theme{
+			Category: "\033[1;38;5;39m", // Bold Artix Cyan
+			Key:      "\033[1;38;5;39m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;39m",
+			Reset:    reset,
+		}
+	case "devuan":
+		return Theme{
+			Category: "\033[1;38;5;134m", // Bold Devuan Violet
+			Key:      "\033[1;38;5;134m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;134m",
+			Reset:    reset,
+		}
+	case "mageia":
+		return Theme{
+			Category: "\033[1;38;5;39m", // Bold Mageia Cyan
+			Key:      "\033[1;38;5;39m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;39m",
+			Reset:    reset,
+		}
+	case "arcolinux":
+		return Theme{
+			Category: "\033[1;38;5;32m", // Bold Arco Blue
+			Key:      "\033[1;38;5;32m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;32m",
+			Reset:    reset,
+		}
+	case "kaos":
+		return Theme{
+			Category: "\033[1;38;5;67m", // Bold KaOS Steel Blue
+			Key:      "\033[1;38;5;67m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;67m",
+			Reset:    reset,
+		}
+	case "guix":
+		return Theme{
+			Category: "\033[1;38;5;214m", // Bold Guix Gold
+			Key:      "\033[1;38;5;214m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;214m",
+			Reset:    reset,
+		}
+	case "bodhi":
+		return Theme{
+			Category: "\033[1;38;5;76m", // Bold Bodhi Green
+			Key:      "\033[1;38;5;76m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;76m",
+			Reset:    reset,
+		}
+	case "asahi":
+		return Theme{
+			Category: "\033[1;38;5;208m", // Bold Asahi Orange
+			Key:      "\033[1;38;5;208m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;208m",
+			Reset:    reset,
+		}
+	case "dragonfly":
+		return Theme{
+			Category: "\033[1;31m", // Bold DragonFly Red
+			Key:      "\033[1;31m",
+			Value:    valColor,
+			Accent:   "\033[1;31m",
+			Reset:    reset,
+		}
+	case "solaris":
+		return Theme{
+			Category: "\033[1;38;5;208m", // Bold Solaris Solar Orange
+			Key:      "\033[1;38;5;208m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;208m",
+			Reset:    reset,
+		}
+	case "haiku":
+		return Theme{
+			Category: "\033[1;38;5;214m", // Bold Haiku Amber
+			Key:      "\033[1;38;5;214m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;214m",
+			Reset:    reset,
+		}
+	case "android":
+		return Theme{
+			Category: "\033[1;38;5;119m", // Bold Android Lime Green
+			Key:      "\033[1;38;5;119m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;119m",
+			Reset:    reset,
+		}
+	case "chromeos":
+		return Theme{
+			Category: "\033[1;38;5;33m", // Bold Chrome Sky Blue
+			Key:      "\033[1;38;5;33m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;33m",
+			Reset:    reset,
+		}
+	case "archcraft":
+		return Theme{
+			Category: "\033[1;38;5;116m", // Bold Archcraft Pastel Cyan
+			Key:      "\033[1;38;5;116m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;116m",
+			Reset:    reset,
+		}
+	case "blackarch":
+		return Theme{
+			Category: "\033[1;31m", // Bold BlackArch Crimson
+			Key:      "\033[1;31m",
+			Value:    valColor,
+			Accent:   "\033[1;31m",
+			Reset:    reset,
+		}
+	case "athena":
+		return Theme{
+			Category: "\033[1;38;5;39m", // Bold Athena Cyber Blue
+			Key:      "\033[1;38;5;39m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;39m",
+			Reset:    reset,
+		}
+	case "endless":
+		return Theme{
+			Category: "\033[1;38;5;203m", // Bold Endless Coral Red
+			Key:      "\033[1;38;5;203m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;203m",
+			Reset:    reset,
+		}
+	case "bunsenlabs":
+		return Theme{
+			Category: "\033[1;37m", // Bold BunsenLabs Silver
+			Key:      "\033[1;37m",
+			Value:    valColor,
+			Accent:   "\033[1;37m",
+			Reset:    reset,
+		}
+	case "pureos":
+		return Theme{
+			Category: "\033[1;38;5;35m", // Bold PureOS Emerald Green
+			Key:      "\033[1;38;5;35m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;35m",
+			Reset:    reset,
+		}
+	case "crux":
+		return Theme{
+			Category: "\033[1;38;5;39m", // Bold CRUX Ice Blue
+			Key:      "\033[1;38;5;39m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;39m",
+			Reset:    reset,
+		}
+	case "chimera":
+		return Theme{
+			Category: "\033[1;38;5;197m", // Bold Chimera Crimson
+			Key:      "\033[1;38;5;197m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;197m",
+			Reset:    reset,
+		}
+	case "vanilla":
+		return Theme{
+			Category: "\033[1;38;5;221m", // Bold Vanilla Gold
+			Key:      "\033[1;38;5;221m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;221m",
+			Reset:    reset,
+		}
+	case "aurora":
+		return Theme{
+			Category: "\033[1;38;5;135m", // Bold Aurora Violet
+			Key:      "\033[1;38;5;135m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;135m",
+			Reset:    reset,
+		}
+	case "postmarketos":
+		return Theme{
+			Category: "\033[1;38;5;29m", // Bold postmarketOS Pine Green
+			Key:      "\033[1;38;5;29m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;29m",
+			Reset:    reset,
+		}
+	case "kubuntu":
+		return Theme{
+			Category: "\033[1;38;5;33m", // Bold Kubuntu Ocean Blue
+			Key:      "\033[1;38;5;33m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;33m",
+			Reset:    reset,
+		}
+	case "xubuntu":
+		return Theme{
+			Category: "\033[1;38;5;39m", // Bold Xubuntu Sky Blue
+			Key:      "\033[1;38;5;39m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;39m",
+			Reset:    reset,
+		}
+	case "lubuntu":
+		return Theme{
+			Category: "\033[1;38;5;32m", // Bold Lubuntu Light Blue
+			Key:      "\033[1;38;5;32m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;32m",
+			Reset:    reset,
+		}
+	case "openwrt":
+		return Theme{
+			Category: "\033[1;38;5;37m", // Bold OpenWrt Turquoise
+			Key:      "\033[1;38;5;37m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;37m",
+			Reset:    reset,
+		}
+	case "rebornos":
+		return Theme{
+			Category: "\033[1;38;5;26m", // Bold RebornOS Deep Blue
+			Key:      "\033[1;38;5;26m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;26m",
+			Reset:    reset,
+		}
+	case "trisquel":
+		return Theme{
+			Category: "\033[1;38;5;39m", // Bold Trisquel Blue
+			Key:      "\033[1;38;5;39m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;39m",
+			Reset:    reset,
+		}
+	case "hyperbola":
+		return Theme{
+			Category: "\033[1;37m", // Bold Hyperbola Pure White
+			Key:      "\033[1;37m",
+			Value:    valColor,
+			Accent:   "\033[1;37m",
+			Reset:    reset,
+		}
+	case "parabola":
+		return Theme{
+			Category: "\033[1;38;5;129m", // Bold Parabola Purple
+			Key:      "\033[1;38;5;129m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;129m",
+			Reset:    reset,
+		}
+	case "minix":
+		return Theme{
+			Category: "\033[1;38;5;39m", // Bold Minix Sky Blue
+			Key:      "\033[1;38;5;39m",
+			Value:    valColor,
+			Accent:   "\033[1;38;5;39m",
+			Reset:    reset,
+		}
 	case "manjaro":
 		return Theme{
 			Category: "\033[1;32m", // Bold Green

@@ -40,7 +40,7 @@
 ## ✨ Features
 
 ### 🎨 Distro & GPU Hardware Branding
-* **40+ Distro Logos**: Authentic ASCII art matching Fastfetch for Linux distributions, macOS, Windows, and BSD.
+* **110+ Distro Logos**: Authentic ASCII art matching Fastfetch for Linux distributions (Ubuntu, Fedora, Arch, Debian, openSUSE, Alpine, Amazon Linux, KDE Linux, Proxmox, Armbian, DietPi, Slackware, Raspbian, Artix, Asahi, Haiku, Guix, Devuan, Mageia, etc.), macOS, Windows, and BSDs (FreeBSD, OpenBSD, NetBSD, DragonFly, GhostBSD, NomadBSD, MidnightBSD).
 * **GPU Vendor Art**: Dedicated `cpufetch`-style ASCII art for **Intel**, **AMD Radeon**, **Nvidia**, **Apple Silicon**, and **ARM Mali** in `-g` mode.
 * **Dynamic Palette Theming**: Auto-detects OS/hardware vendor and dynamically themes keys, labels, borders, and meters to match.
 * **ANSI Color Grid**: Classic 16-color ANSI blocks (`███`) for terminal color verification.
@@ -163,12 +163,23 @@ Measured real wall-clock latency on standard Linux hardware:
 
 ### ⚡ One-Line Install Script (Linux, macOS, BSD)
 ```bash
+# Standard installation or update (automatically detects existing version & pre-releases):
 curl -fsSL https://raw.githubusercontent.com/codedbysoumyajit/KernelView-Go/main/install.sh | sh
+
+# Non-interactive / CI (auto-confirm):
+curl -fsSL https://raw.githubusercontent.com/codedbysoumyajit/KernelView-Go/main/install.sh | sh -s -- -y
+
+# Install latest Beta / Pre-release directly:
+curl -fsSL https://raw.githubusercontent.com/codedbysoumyajit/KernelView-Go/main/install.sh | sh -s -- --beta
 ```
 
 ### Windows (PowerShell)
 ```powershell
+# Standard installation or update:
 irm https://raw.githubusercontent.com/codedbysoumyajit/KernelView-Go/main/install.ps1 | iex
+
+# Install latest Beta / Pre-release directly:
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/codedbysoumyajit/KernelView-Go/main/install.ps1))) -Beta
 ```
 
 ---
