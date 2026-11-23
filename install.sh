@@ -18,7 +18,7 @@
 set -e
 
 REPO="codedbysoumyajit/KernelView-Go"
-FALLBACK_TAG="v1.4.0"
+FALLBACK_TAG="v1.4.0-nightly"
 BINARY_NAME="kernelview"
 
 # Parse CLI options

@@ -39,7 +39,7 @@ try {
 }
 
 $repo = "codedbysoumyajit/KernelView-Go"
-$fallbackTag = "v1.4.0"
+$fallbackTag = "v1.4.0-nightly"
 $exeName = "kernelview.exe"
 
 # Architecture detection
